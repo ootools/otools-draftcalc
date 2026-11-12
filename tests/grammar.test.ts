@@ -61,6 +61,13 @@ describe('连续运算符去重（保留第一个，删后续）', () => {
       '2', '+', '5',
     ]);
   });
+
+  it('乘号后的前缀负号同样被删（keep-first 钉死）：[5,*,-,3] → [5,*,3]', () => {
+    // 审查钉死：'-' 跟在运算符后一律按 run 后续删除，不当作 3 的负号保留；
+    // run 首 '*' 保留（与 [2,+,+]→[2,+] 同一语义）。注意若把 '*' 一并删掉
+    // 会得到 [5,3] 并被 parse2d 合并成数字 53，故保留项必为 [5,*,3]。
+    expect(labels(correctGlyphs([gl('5'), gl('*'), gl('-'), gl('3')]))).toEqual(['5', '*', '3']);
+  });
 });
 
 describe('纠正不动 bbox/strokes/label/alts（计划 Step 1 断言）', () => {
@@ -91,6 +98,10 @@ describe('纠正不动 bbox/strokes/label/alts（计划 Step 1 断言）', () =>
   it('不基于语义改写 label：正常序列原样通过（fracbar/sqrt 不受运算符规则影响）', () => {
     const input = [gl('sqrt'), gl('9'), gl('+'), gl('5')];
     expect(labels(correctGlyphs(input))).toEqual(['sqrt', '9', '+', '5']);
+  });
+
+  it("行首 fracbar 不删（parse2d 把缺上/下内容的 fracbar 降级为 '-' op 的衔接约定）", () => {
+    expect(labels(correctGlyphs([gl('fracbar'), gl('5')]))).toEqual(['fracbar', '5']);
   });
 });
 

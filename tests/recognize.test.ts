@@ -185,6 +185,24 @@ describe('OrtRecognizer 预热与缓存（注入假 session；node 下无法创�
     expect(rec.classify(img).map((c) => c.label)).toEqual(['5', '3', '8']);
   });
 
+  it('whenSettled：单个推理失败不 reject（allSettled 语义），失败图不入缓存', async () => {
+    const rec = new OrtRecognizer();
+    injectSession(rec, async () => {
+      throw new Error('wasm 推理崩溃');
+    });
+    const img = warmImg();
+
+    expect(() => rec.classify(img)).toThrow(WarmupError); // 首见图触发热身
+    // 失败详情由 classifyAsync 的 awaiter 获得（同图并发去重返回同一 pending）
+    await expect(rec.classifyAsync(img)).rejects.toThrow(/识别引擎未就绪/);
+
+    // whenSettled 等待失败推理收尾后照常 resolve，不 reject
+    await expect(rec.whenSettled()).resolves.toBeUndefined();
+
+    // 失败图不入缓存：再次 classify 重新预热（WarmupError），不返回错误候选
+    expect(() => rec.classify(img)).toThrow(WarmupError);
+  });
+
   it('缓存命中返回副本：调用方原地修改返回值不影响后续同图调用', async () => {
     const rec = new OrtRecognizer();
     injectSession(rec, async () => ({ logits: { data: logits538() } }));

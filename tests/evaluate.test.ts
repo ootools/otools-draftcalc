@@ -215,4 +215,9 @@ describe('formatValue 直测', () => {
     expect(formatValue(0.30000000000000004)).toBe('≈ 0.3');
     expect(formatValue(100000.2)).toBe('≈ 100000');
   });
+
+  it('巨大整数：十进制意图 ≤6 位有效时精确整串，否则 ≈ + 6 位有效（钉住指数路径）', () => {
+    expect(formatValue(1e21)).toBe('1e+21');
+    expect(formatValue(1.234567e21)).toBe('≈ 1.23457e+21');
+  });
 });

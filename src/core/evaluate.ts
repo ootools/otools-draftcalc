@@ -23,6 +23,11 @@
  * compare：lhs/rhs 各自求值，任一失败 → error 且 message 注明哪侧；两侧
  * 成功 → 双 Fraction 精确相等（BigInt 交叉相乘），否则 number 相对容差
  * |a-b| ≤ 1e-9×max(1,|a|,|b|)。
+ *
+ * 架构取舍（固有行为，非疏漏）：√(非整平方的有理数) 显示 "≈" 而非精确分数
+ * —— mathjs Fraction 通道的 sqrt 一律抛错（内部走 BigNumber 转换，√2 无理、
+ * √9 亦然），回退 number 通道后值已是浮点近似，无法再还原为精确分数；同理
+ * 2^(1/2) 类非整数次幂由 mathjs 直接落为 number。据此 √9 → "3"、√2 → "≈ 1.41421"。
  */
 import { create, all } from 'mathjs';
 import type { Fraction } from 'mathjs';
@@ -123,7 +128,21 @@ function toNumberValue(v: NumValue): number {
 function formatNumber(v: number): string {
   if (!Number.isFinite(v)) return '无法计算该算式';
   const r = Math.round(v);
-  if (Math.abs(v - r) < 1e-9) return String(r);
+  if (Math.abs(v - r) < 1e-9) {
+    // 安全整数范围内整数精确显示（含 3.0000000001 → "3" 的近整数归整）
+    if (Number.isSafeInteger(r)) return String(r);
+    // 超出安全整数（2^53）后 float 在此量级上全为整数，「整数串」仅当其
+    // 十进制意图不超过显示精度预算（6 位有效）时精确给出（1e21 → "1e+21"）；
+    // 否则退回 ≈ + 6 位有效（1.234567e21 → "≈ 1.23457e+21"），避免 17 位
+    // 浮点噪声尾数冒充精确值（审查钉死的指数路径行为）。
+    const s = String(r);
+    if (sigDigitsOf(s) <= 6) return s;
+  }
+  return approx6(v);
+}
+
+/** ≈ + 6 位有效数字（去尾零）。 */
+function approx6(v: number): string {
   const s = v.toPrecision(6);
   if (s.includes('e')) {
     // 指数形式只整理尾数部分的尾零（"1.00000e-7" → "1e-7"）
@@ -134,6 +153,11 @@ function formatNumber(v: number): string {
   // 仅小数形式去尾零（"2.50000" → "2.5"）；整数形式如 "100000" 的尾零有效
   const trimmed = s.includes('.') ? s.replace(/0+$/, '').replace(/\.$/, '') : s;
   return `≈ ${trimmed}`;
+}
+
+/** 最短表示的有效位个数（去符号/小数点/尾零），用于巨大整数的显示预算判定。 */
+function sigDigitsOf(s: string): number {
+  return s.split('e')[0].replace(/[-.]/g, '').replace(/0+$/, '').length;
 }
 
 // ---------------------------------------------------------------- AST → 表达式串
