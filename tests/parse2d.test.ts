@@ -8,6 +8,13 @@
  *   - ③ 临界断言：0.7× 基线主高的"上标"归基线（反向断言）+ 连续多位指数；
  *   - 无 '=' → rhs=null；多个 '=' 取第一个、其余随 rhs 丢弃；
  *   - 边界：sqrt 空作用域、√(16) 括号组、孤立不配对括号按原样保留。
+ *
+ * R1-R15 为 T5 审查回归（P1 静默错值优先）：
+ *   - R1-R3  node token 前的悬空数字串须即时结算（2(3+4) 倒置 / 2½ / 跨节点并串）
+ *   - R4-R8  主高估计在层内小 glyph ≥ 半数时不得塌缩（2^10、3^99、2^100、10^235、
+ *            10^(-23) 括号负指数，指数为裸 op 时不组 pow）
+ *   - R9-R11 sqrt 作用域不吸二维 node（分数线写法 / 后随括号组 / 运算符截断）
+ *   - R12-R15 未配对 "("、繁分数、(1/2)/(3/4)、多小数点防御路径
  */
 import { describe, expect, it } from 'vitest';
 import { parseEquation, parseExpr } from '../src/core/parse2d';
@@ -223,5 +230,192 @@ describe('边界与下游衔接', () => {
       gl('4', 56, 20, 64, 40),
     ]);
     expect(ast).toEqual(seq(num('3'), num(')'), op('+'), num('4')));
+  });
+});
+
+describe('P1 回归：node token 前的悬空数字串须即时结算', () => {
+  it('R1 2(3+4) → seq[num 2, 括号组]（不得倒置为 seq[括号组, num 2]）', () => {
+    const ast = parseExpr([
+      gl('2', 10, 20, 18, 40),
+      gl('(', 24, 8, 30, 44),
+      gl('3', 36, 20, 44, 40),
+      gl('+', 50, 24, 62, 38),
+      gl('5', 68, 20, 76, 40),
+      gl(')', 82, 8, 88, 44),
+    ]);
+    expect(ast).toEqual(seq(num('2'), seq(num('3'), op('+'), num('5'))));
+  });
+
+  it('R2 2½ 带分数 → seq[num 2, frac(1,2)]', () => {
+    const ast = parseExpr([
+      gl('2', 10, 20, 18, 40),
+      gl('1', 24, 6, 30, 18),
+      gl('fracbar', 22, 22, 36, 22),
+      gl('2', 26, 28, 32, 40),
+    ]);
+    expect(ast).toEqual(seq(num('2'), { kind: 'frac', num: num('1'), den: num('2') }));
+  });
+
+  it('R3 2(3+4)5 → 数字不得跨节点并串（不得产出 num "25"）', () => {
+    const ast = parseExpr([
+      gl('2', 10, 20, 18, 40),
+      gl('(', 24, 8, 30, 44),
+      gl('3', 36, 20, 44, 40),
+      gl('+', 50, 24, 62, 38),
+      gl('5', 68, 20, 76, 40),
+      gl(')', 82, 8, 88, 44),
+      gl('5', 94, 20, 102, 40),
+    ]);
+    expect(ast).toEqual(seq(num('2'), seq(num('3'), op('+'), num('5')), num('5')));
+  });
+});
+
+describe('P1 回归：主高估计在层内小 glyph ≥ 半数时不得塌缩', () => {
+  it('R4 2^10 → pow(num 2, num 10)（不得并成 num "210"）', () => {
+    const ast = parseExpr([
+      gl('2', 10, 20, 20, 40),
+      gl('1', 26, 10, 32, 20),
+      gl('0', 36, 10, 42, 20),
+    ]);
+    expect(ast).toEqual({ kind: 'pow', base: num('2'), exp: num('10') });
+  });
+
+  it('R5 3^99 → pow(num 3, num 99)', () => {
+    const ast = parseExpr([
+      gl('3', 10, 20, 18, 40),
+      gl('9', 26, 10, 34, 20),
+      gl('9', 38, 10, 46, 20),
+    ]);
+    expect(ast).toEqual({ kind: 'pow', base: num('3'), exp: num('99') });
+  });
+
+  it('R6 2^100 → pow(num 2, num 100)', () => {
+    const ast = parseExpr([
+      gl('2', 10, 20, 20, 40),
+      gl('1', 26, 10, 32, 20),
+      gl('0', 36, 10, 42, 20),
+      gl('0', 46, 10, 52, 20),
+    ]);
+    expect(ast).toEqual({ kind: 'pow', base: num('2'), exp: num('100') });
+  });
+
+  it('R7 10^235 → pow(num 10, num 235)', () => {
+    const ast = parseExpr([
+      gl('1', 10, 20, 16, 40),
+      gl('0', 20, 20, 26, 40),
+      gl('2', 32, 10, 40, 20),
+      gl('3', 44, 10, 52, 20),
+      gl('5', 56, 10, 64, 20),
+    ]);
+    expect(ast).toEqual({ kind: 'pow', base: num('10'), exp: num('235') });
+  });
+
+  it('R8 10^(-23) 括号负指数 → pow(num 10, seq[op -, num 23])（node 可入指数组且 exp 非裸 op）', () => {
+    const ast = parseExpr([
+      gl('1', 10, 20, 16, 40),
+      gl('0', 20, 20, 26, 40),
+      gl('(', 32, 10, 36, 20),
+      gl('-', 38, 13, 44, 14),
+      gl('2', 46, 10, 52, 20),
+      gl('3', 54, 10, 60, 20),
+      gl(')', 62, 10, 66, 20),
+    ]);
+    expect(ast).toEqual({ kind: 'pow', base: num('10'), exp: seq(op('-'), num('23')) });
+  });
+});
+
+describe('P2 回归：sqrt 作用域不吸二维 node', () => {
+  it('R9 √2/2 分数线写法 → √ 截断，不得产出 sqrt(frac(2,2))', () => {
+    const ast = parseExpr([
+      gl('sqrt', 6, 6, 18, 40),
+      gl('2', 22, 8, 30, 26),
+      gl('fracbar', 20, 30, 38, 30),
+      gl('2', 26, 36, 34, 54),
+    ]);
+    expect(ast).toEqual(
+      seq({ kind: 'sqrt', arg: seq() }, { kind: 'frac', num: num('2'), den: num('2') }),
+    );
+  });
+
+  it('R10 √9(3) → 后随括号组不吸入作用域', () => {
+    const ast = parseExpr([
+      gl('sqrt', 10, 10, 22, 40),
+      gl('9', 28, 14, 38, 38),
+      gl('(', 52, 8, 58, 44),
+      gl('3', 64, 16, 72, 38),
+      gl(')', 78, 8, 84, 44),
+    ]);
+    expect(ast).toEqual(seq({ kind: 'sqrt', arg: num('9') }, num('3')));
+  });
+
+  it('R11 √9+3 → 作用域遇同级运算符截断', () => {
+    const ast = parseExpr([
+      gl('sqrt', 10, 10, 22, 40),
+      gl('9', 28, 14, 38, 38),
+      gl('+', 44, 24, 56, 38),
+      gl('3', 62, 20, 70, 40),
+    ]);
+    expect(ast).toEqual(seq({ kind: 'sqrt', arg: num('9') }, op('+'), num('3')));
+  });
+});
+
+describe('P3 补充路径', () => {
+  it('R12 未配对 "(" → 保持顺序、括号保留为叶子', () => {
+    const ast = parseExpr([
+      gl('(', 10, 14, 16, 44),
+      gl('3', 22, 20, 30, 40),
+      gl('+', 36, 24, 48, 38),
+      gl('4', 54, 20, 62, 40),
+    ]);
+    expect(ast).toEqual(seq(num('('), num('3'), op('+'), num('4')));
+  });
+
+  it('R13 繁分数（内层横线窄于外层）→ frac(frac(1,2), 3)', () => {
+    const ast = parseExpr([
+      gl('1', 14, 8, 22, 24),
+      gl('fracbar', 12, 28, 26, 28),
+      gl('2', 14, 34, 22, 50),
+      gl('fracbar', 8, 56, 52, 56),
+      gl('3', 26, 62, 34, 78),
+    ]);
+    expect(ast).toEqual({
+      kind: 'frac',
+      num: { kind: 'frac', num: num('1'), den: num('2') },
+      den: num('3'),
+    });
+  });
+
+  it('R14 (1/2)/(3/4) → seq[frac, op /, frac]', () => {
+    const ast = parseExpr([
+      gl('(', 8, 8, 14, 52),
+      gl('1', 20, 12, 28, 28),
+      gl('fracbar', 14, 32, 36, 32),
+      gl('2', 20, 38, 28, 54),
+      gl(')', 42, 8, 48, 52),
+      gl('/', 56, 26, 68, 38),
+      gl('(', 74, 8, 80, 52),
+      gl('3', 86, 12, 94, 28),
+      gl('fracbar', 80, 32, 102, 32),
+      gl('4', 86, 38, 94, 54),
+      gl(')', 108, 8, 114, 52),
+    ]);
+    expect(ast).toEqual(
+      seq(
+        { kind: 'frac', num: num('1'), den: num('2') },
+        op('/'),
+        { kind: 'frac', num: num('3'), den: num('4') },
+      ),
+    );
+  });
+
+  it('R15 多小数点 3.5.7 → 原样拼进 num.text（语法错误交 T6/求值报 error，防御路径钉死）', () => {
+    const ast = parseExpr([
+      gl('3', 10, 20, 18, 40),
+      gl('.', 24, 36, 26, 38),
+      gl('5', 32, 20, 40, 40),
+      gl('.', 44, 36, 46, 38),
+      gl('7', 52, 20, 60, 40),
+    ]);
+    expect(ast).toEqual(num('3.5.7'));
   });
 });

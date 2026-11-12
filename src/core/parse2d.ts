@@ -6,27 +6,36 @@
  *
  *   ① fracbar：x 区间能覆盖其上方与下方内容（上/下各至少 1 个 token、与横线 bbox
  *      在 x 上重叠 ≥30% 内容宽、垂直方向紧邻）→ frac 节点，上/下递归；多个有效
- *      横线取最宽者先归约（嵌套/宽横线的外层先吃掉内容）。
+ *      横线取最宽者先归约（嵌套/宽横线的外层先吃掉内容，繁分数由此成立）。
  *      上方或下方缺内容的 fracbar 一律降级为 '-' op glyph —— 这是 T3 审查发现的
  *      「浅斜 × 退化两个 fracbar」与「分子负号」场景的语境裁决点。
  *   ② sqrt 作用域：√ 右侧（x0 > √.x0）、顶部不低于 √ 顶部 + 60%×√ 高度的连续
- *      token 序列，遇 + - * / = 截断（根号只绑定紧跟的操作数，括号内算子不受影响）；
+ *      token 序列，遇 + - * / = 截断（根号只绑定紧跟的操作数，括号内算子不受影响）。
+ *      二维 node 不吸入（审查 P2）：frac（分数线写法）一律截断——要进根号须写
+ *      括号 √(1/2)；括号组仅当紧跟 √（x0 ≤ √.x1 + 0.5×基线主高）才视为 radicand
+ *      （√9(3) 的 (3) 不吸入，√(16) 吸入）。
  *      右侧无内容 → arg 取空 seq（求值时报错，由 T6 处理）。
  *   ③ 上标：高度 < 0.6×当前层基线主高、bbox 顶高于前一基线 token 顶、x 在其后 →
- *      前一个基线 token 为 base 组成 pow；上标本身可以是连续多个 glyph（如 10 的
- *      两位指数），整组递归解析。0.6× 为阈值：0.7× 高度的临界上标归基线。
+ *      前一个基线 token 为 base 组成 pow。上标可以是连续多个 glyph（10 的两位
+ *      指数）或小型抬头的括号组（10^(-23)，审查 P2）；整组递归解析，组内首位
+ *      '-' 视为负号并入（exp = seq[op -, …]）；指数为裸 op 时不组 pow、按普通
+ *      内容展开。0.6× 为阈值：0.7× 高度的临界上标归基线。
  *   ④ 余下按 x 升序为基线 seq：连续数字与 '.' 合成 num（'.' 允许多次属语法错误，
  *      此处只拼进 text 由下游报错）、+ - * / → op（降级 fracbar 记 '-'）、
  *      孤立不配对括号按原样保留为叶子（T6 grammar 清理）。
+ *      任何基线元素落盘前先结算悬空数字串（审查 P1）：2(3+4)5 →
+ *      seq[num 2, 括号组, num 5]，数字绝不跨 node 并串或倒置。
  *   '=' 在 parseEquation 层按第一个切分 lhs/rhs；多余 '=' 随 rhs 丢弃
  *      （真实管线中 T6 correctGlyphs 在解析前已清理）。
  *
  * 实现要点：
  * - 括号配对前置为 tokenize（先于 ①②③），把每对 ( … ) 归约成一个 node token，
  *   使分数/根号的区域切分不会撕裂括号组（如 √(1/2)、(1/2)²）。
- * - 基线主高 = 该层非上标 glyph 高度中位数；用「高度 ≥ 全集中位数」子集的中位数
- *   一次性估计（两字符层如 2³ 的全集中位数会被上标拉低而失效，较高半区对少量
- *   上标不敏感）。
+ * - 基线主高 = 该层非上标 glyph 高度中位数。估计器（审查 P1）：以 plain glyph 的
+ *   最高者为基线锚点（上标/降级横线不会是层内最高的 plain；无 plain token 时
+ *   退化为全体最高者），取「高度 ≥ 0.6×锚点」子集的中位数 —— 层内小 glyph 达到
+ *   半数以上时（2^10、2^100）全集中位数会被上标拉低而失效，较高子集对上标
+ *   数量不敏感；0.7× 临界上标仍归基线（此时它参与主高子集、抬高估计）。
  * - 所有递归都作用在严格缩小的 token 子集上，必然终止；无 DOM 依赖。
  */
 import type { BBox, Equation, ExprNode, Glyph, SymbolLabel } from './types';
@@ -77,22 +86,31 @@ function isDigit(l: SymbolLabel): boolean {
 /**
  * 一层内的 token：
  * - plain：单个 glyph（degraded 标记「上/下缺内容而降级为 '-'」的 fracbar）；
- * - node：已归约的子树（括号组 / frac / sqrt），bbox 为其几何外包。
+ * - node：已归约的子树，bbox 为其几何外包；nodeKind 记录来源
+ *   （paren=括号组 / frac=分数线 / sqrt=根号），供 ② 的作用域约束使用。
  */
 type Tok =
   | { kind: 'plain'; g: Glyph; degraded?: boolean }
-  | { kind: 'node'; node: ExprNode; bbox: BBox };
+  | { kind: 'node'; nodeKind: 'paren' | 'frac' | 'sqrt'; node: ExprNode; bbox: BBox };
 
 type PlainTok = Extract<Tok, { kind: 'plain' }>;
 
 const tokBBox = (t: Tok): BBox => (t.kind === 'plain' ? t.g.bbox : t.bbox);
 
-/** 基线主高：非上标 glyph 高度中位数 → 取「≥ 全集中位数」子集的中位数估计。 */
+/**
+ * 基线主高：该层非上标 glyph 高度中位数的估计。
+ * 以 plain glyph 的最高者为锚点（无 plain token 时用全体最高者），
+ * 取「高度 ≥ 0.6×锚点」子集的中位数。
+ */
 function mainHeight(tokens: Tok[]): number {
-  const hs = tokens.map((t) => hOf(tokBBox(t)));
-  if (hs.length === 0) return 0;
-  const m = median(hs);
-  return median(hs.filter((h) => h >= m));
+  const allHs = tokens.map((t) => hOf(tokBBox(t)));
+  if (allHs.length === 0) return 0;
+  const plainHs = tokens
+    .filter((t): t is PlainTok => t.kind === 'plain')
+    .map((t) => hOf(t.g.bbox));
+  const anchor = Math.max(...(plainHs.length > 0 ? plainHs : allHs));
+  const mains = allHs.filter((h) => h >= 0.6 * anchor);
+  return median(mains.length > 0 ? mains : allHs);
 }
 
 // ---------------------------------------------------------------- 括号配对前置
@@ -117,7 +135,7 @@ function tokenize(sorted: Glyph[]): Tok[] {
       const f = frames.pop()!;
       const node = parseTokens(f.inner);
       const bbox = hullAll([f.paren.bbox, ...f.inner.map(tokBBox), g.bbox]);
-      emit({ kind: 'node', node, bbox });
+      emit({ kind: 'node', nodeKind: 'paren', node, bbox });
     } else {
       emit({ kind: 'plain', g });
     }
@@ -195,6 +213,7 @@ function splitByBar(tokens: Tok[]): BarSplit | null {
   };
   const barNode: Tok = {
     kind: 'node',
+    nodeKind: 'frac',
     node,
     bbox: hullAll([bb, ...above.map(tokBBox), ...below.map(tokBBox)]),
   };
@@ -205,8 +224,12 @@ function splitByBar(tokens: Tok[]): BarSplit | null {
 
 /**
  * 归约左数第一个 sqrt 的作用域：√ 右侧、顶部 ≤ √顶 + 60%×√高 的连续 token，
- * 遇 + - * / =（含降级 fracbar）截断；右侧无内容（或首 token 即不满足）→
- * arg 为空 seq。返回替换后的 token 列表；无 sqrt 返回 null。
+ * 遇 + - * / =（含降级 fracbar）截断。二维 node 不吸入：
+ * - frac node 一律截断（分数线写法的 √2/2 不得变成 sqrt(frac(2,2))，要进根号
+ *   须写括号 √(1/2)——括号组归 tokenize、其内部递归不受影响）；
+ * - 括号组仅当紧跟 √（x0 ≤ √.x1 + 0.5×基线主高）才属 radicand（√9(3) 不吸入）。
+ * 右侧无内容（或首 token 即不满足）→ arg 为空 seq。返回替换后的 token 列表；
+ * 无 sqrt 返回 null。
  */
 function applySqrt(tokens: Tok[]): Tok[] | null {
   const idx = tokens.findIndex((t) => t.kind === 'plain' && t.g.label === 'sqrt');
@@ -214,6 +237,7 @@ function applySqrt(tokens: Tok[]): Tok[] | null {
   const s = tokens[idx] as PlainTok;
   const sb = s.g.bbox;
   const topLimit = sb.y0 + 0.6 * hOf(sb);
+  const attachTol = 0.5 * mainHeight(tokens);
   const scope: Tok[] = [];
   let rest = tokens.length;
   for (let i = idx + 1; i < tokens.length; i++) {
@@ -225,6 +249,9 @@ function applySqrt(tokens: Tok[]): Tok[] | null {
         rest = i;
         break;
       }
+    } else if (t.nodeKind === 'frac' || tb.x0 > sb.x1 + attachTol) {
+      rest = i;
+      break;
     }
     if (tb.x0 <= sb.x0 || tb.y0 > topLimit) {
       rest = i;
@@ -235,6 +262,7 @@ function applySqrt(tokens: Tok[]): Tok[] | null {
   const node: ExprNode = { kind: 'sqrt', arg: parseTokens(scope) };
   const nodeTok: Tok = {
     kind: 'node',
+    nodeKind: 'sqrt',
     node,
     bbox: hullAll([sb, ...scope.map(tokBBox)]),
   };
@@ -245,10 +273,11 @@ function applySqrt(tokens: Tok[]): Tok[] | null {
 
 /**
  * ③④：上标归并 + 基线 seq 组装。返回该层基线 item 列表。
- * 上标判定：高度 < 0.6×基线主高 且 bbox 顶高于前一基线 token 顶 且 x 在其后；
- * 连续小 glyph 合成同一指数组，整组递归解析后挂到前一个基线 token（数字串
- * 先合并成 num 再挂，保证 10²³ 的 base 是 num "10"）。前一元素是 op 时
- * （行首/运算符后的小 glyph）不组 pow，按普通内容展开。
+ * 上标判定（plain 与 node 均可入指数组）：高度 < 0.6×基线主高 且 bbox 顶高于
+ * 前一基线 token 顶 且 x 在其后；连续成员合成同一指数组，整组递归解析后挂到
+ * 前一个基线 token（数字串先合并成 num 再挂，保证 10²³ 的 base 是 num "10"）。
+ * exp 为裸 op、或前一元素是 op（行首/运算符后的小 glyph）时不组 pow，
+ * 按普通内容展开。
  */
 function baselineItems(tokens: Tok[]): ExprNode[] {
   const limit = 0.6 * mainHeight(tokens);
@@ -269,48 +298,50 @@ function baselineItems(tokens: Tok[]): ExprNode[] {
     flushNum();
     const group = sup;
     sup = null;
+    const exp = parseTokens(group);
     const prev = items[items.length - 1];
-    if (prev && prev.kind !== 'op') {
+    if (prev && prev.kind !== 'op' && exp.kind !== 'op') {
       items.pop();
-      items.push({ kind: 'pow', base: prev, exp: parseTokens(group) });
+      items.push({ kind: 'pow', base: prev, exp });
     } else {
-      items.push(parseTokens(group));
+      // 无法组乘方（前一元素是 op / 行首 / 指数为裸 op）：按普通内容展开
+      items.push(exp);
     }
   };
 
   for (const t of tokens) {
-    if (t.kind === 'node') {
-      flushSup();
-      items.push(t.node);
-      baseTop = t.bbox.y0;
-      baseX0 = t.bbox.x0;
-      continue;
-    }
-    const g = t.g;
-    const gb = g.bbox;
-    if (g.label === '=') {
+    const tb = tokBBox(t);
+    if (t.kind === 'plain' && t.g.label === '=') {
       // parseEquation 已按第一个 '=' 切分；多余的 '=' 在此丢弃并断开数字串
       flushSup();
       flushNum();
       continue;
     }
-    if (
-      !t.degraded &&
-      hOf(gb) < limit &&
-      baseTop !== null &&
-      gb.y0 < baseTop &&
-      gb.x0 > baseX0
-    ) {
-      // ③ 上标：连续小 glyph 归入同一指数组（不更新基线参照）
+    const heightOk =
+      t.kind === 'plain' ? !t.degraded && hOf(tb) < limit : hOf(tb) < limit;
+    if (heightOk && baseTop !== null && tb.y0 < baseTop && tb.x0 > baseX0) {
+      // ③ 上标：连续成员归入同一指数组（不更新基线参照）
       if (sup) sup.push(t);
       else sup = [t];
       continue;
     }
     flushSup();
+    if (t.kind === 'node') {
+      // P1-1：node 落盘前结算悬空数字串（2(3+4)5 的 2 不得跨 node 并串/倒置）
+      flushNum();
+      items.push(t.node);
+      baseTop = tb.y0;
+      baseX0 = tb.x0;
+      continue;
+    }
+    const g = t.g;
+    const gb = g.bbox;
     baseTop = gb.y0;
     baseX0 = gb.x0;
     const l = g.label;
     if (isDigit(l) || l === '.') {
+      // 连续数字/'.' 拼进同一 num（'.' 出现多次属语法错误，不在此报错，
+      // T6 grammar/求值层按非法数字串报 error —— 防御路径由测试钉死）
       run += l;
       continue;
     }
