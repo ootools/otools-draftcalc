@@ -15,12 +15,14 @@ import { bboxOf, normalizeGlyph } from '../src/core/strokes.ts';
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * 合成笔画（与 tests/strokes.test.ts 的宽扁字形同一取材风格）：
- * 一个手绘减号——单笔横向长条，宽 48px、y 方向 ±1.5px 抖动（h≈2.8px，宽高比约 17:1）。
- * 非整数缩放比（20/48）+ 近退化高度 + 跨取整边界的 y 值，
+ * 合成笔画（与 tests/strokes.test.ts 的取材风格一致），三笔一组：
+ * 1. 手绘减号——横向长条，宽 48px、y 抖动 ±1.5px（宽高比约 17:1，浅斜率分支）
+ * 2. 陡斜线——dx=15、dy=40（斜率 ~2.7，Bresenham 陡线分支）
+ * 3. 45° 斜线——dx=dy=20（恰踩 steep/shallow 分支边界 e2<=dx 的临界形态）
+ * 非整数缩放比（bbox 50×61 → 长边 20）+ 近退化高度 + 跨取整边界 + 三种斜率分支，
  * 是归一化管线里最容易在 TS/Python 间产生偏差的路径，作为 parity 用例最有代表性。
  */
-const minusStrokes = [
+const fixtureStrokes = [
   {
     id: 0,
     pts: [
@@ -33,9 +35,27 @@ const minusStrokes = [
       { x: 248, y: 311.6, t: 220 },
     ],
   },
+  {
+    id: 1,
+    pts: [
+      { x: 200, y: 330.0, t: 300 },
+      { x: 205, y: 343.3, t: 345 },
+      { x: 210, y: 356.8, t: 390 },
+      { x: 215, y: 370.0, t: 440 },
+    ],
+  },
+  {
+    id: 2,
+    pts: [
+      { x: 230, y: 330.5, t: 500 },
+      { x: 237, y: 337.2, t: 540 },
+      { x: 243, y: 343.9, t: 580 },
+      { x: 250, y: 350.4, t: 630 },
+    ],
+  },
 ];
 
-const strokes = minusStrokes;
+const strokes = fixtureStrokes;
 const bbox = bboxOf(strokes);
 const expected = Array.from(normalizeGlyph({ strokes, bbox }));
 
@@ -53,7 +73,7 @@ for (let r = 0; r < 28; r++) {
 
 const fixture = {
   description:
-    'Hand-drawn minus-like wide-flat glyph. normalizeGlyph parity fixture: Python side (training/preprocess.py) must reproduce `expected` from `strokes` (crop -> long-edge 20px -> center pad 28x28 -> floor(v+0.5) rounding -> integer Bresenham 1px lines; ink=1, background=0, row-major img[row*28+col]).',
+    'Three-stroke glyph (minus + steep diagonal + 45-degree diagonal). normalizeGlyph parity fixture: Python side (training/preprocess.py) must reproduce `expected` from `strokes` (crop -> long-edge 20px -> center pad 28x28 -> floor(v+0.5) rounding -> integer Bresenham 1px lines; ink=1, background=0, row-major img[row*28+col]).',
   algorithm: {
     size: 28,
     target: 20,

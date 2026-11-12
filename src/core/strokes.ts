@@ -10,7 +10,7 @@
  *   4. rasterize：各点变换后按 floor(v+0.5) 取整到像素格点（不用 Math.round，
  *                 便于 Python 以 math.floor(v+0.5) 复现同一结果），
  *                 笔内相邻点之间画标准整数 Bresenham 线段（1px 线宽）；
- *   5. 输出     ：行主序 Float32Array(784)，白底黑字 → 背景 0.0、笔迹 1.0。
+   *   5. 输出     ：行主序 Float32Array(784)，黑底白字（MNIST 极性约定）→ 背景 0.0、笔迹 1.0。
  *
  * 无任何 DOM/canvas 依赖，可在 node/vitest 下直接运行。
  */

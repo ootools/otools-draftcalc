@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A standalone OTools plugin: handwritten math on draft paper, offline recognition and exact fraction evaluation.",
-  "engines": { "node": ">=22.12" },
+  "engines": { "node": ">=22.18" },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 6547",
     "build": "vue-tsc --noEmit && vite build",
