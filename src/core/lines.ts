@@ -56,7 +56,7 @@
 import { evalEquation, type EvalResult } from './evaluate';
 import { correctGlyphs } from './grammar';
 import { parseEquation } from './parse2d';
-import { segmentClassify } from './recognize';
+import { WarmupError, segmentClassify } from './recognize';
 import { segmentGlyphs, type ClassifyFn } from './segment';
 import { bboxOf, normalizeGlyph } from './strokes';
 import type { BBox, Equation, Glyph, Stroke, SymbolLabel } from './types';
@@ -386,7 +386,32 @@ export function createPipeline(
 ): LinePipeline {
   return {
     run(strokes: Stroke[]): { glyphs: Glyph[]; eq: Equation | null; result: EvalResult | null } {
-      const segmented = segmentGlyphs(strokes, classify, lineHeightOf(strokes, fallbackLineHeight));
+      // 批量预热（Task 10 集成修复）：segmentGlyphs 遇到首个未缓存图会经
+      // classify 抛 WarmupError 中止整次分割 —— 若不加处理，每次重跑只会
+      // 触发【一个】新图的后台推理，N 个符号的行需要 N 轮重跑；超过
+      // MAX_CONSECUTIVE_WARMUP（5）后行永久卡在 writing（真实引擎集成实测）。
+      // 这里用占位 classify 收集全部未缓存图：命中照常返回；Warmup 时记下图、
+      // 返回占位候选让分割扫描走完 —— 占位 label 绝不外泄（missing 非空则
+      // 在纠错/解析前统一抛 WarmupError，本 run 的全部产出被丢弃），此时所有
+      // 未缓存图都已被 classify 触发后台推理，whenSettled 后一轮重跑全命中。
+      // 引擎持续故障路径不受影响：推理任务失败 → 缓存永不命中 → 每轮仍抛
+      // WarmupError → 既有连续失败上限照常止住循环。
+      const missing: Float32Array[] = [];
+      const warming: ClassifyFn = (img) => {
+        try {
+          return classify(img);
+        } catch (e) {
+          if (e instanceof WarmupError) {
+            missing.push(img);
+            return [{ label: '0', prob: 1 }];
+          }
+          throw e;
+        }
+      };
+      const segmented = segmentGlyphs(strokes, warming, lineHeightOf(strokes, fallbackLineHeight));
+      if (missing.length > 0) {
+        throw new WarmupError(`识别预热中：${missing.length} 个符号图已触发后台推理`);
+      }
       const overridden =
         labelOverride === undefined ? segmented : segmented.map((g) => applyLabelOverride(g, labelOverride));
       const glyphs = correctGlyphs(overridden);

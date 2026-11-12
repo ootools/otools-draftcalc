@@ -122,8 +122,19 @@ export class OrtRecognizer implements Recognizer {
   async init(): Promise<void> {
     try {
       const ort = await import('onnxruntime-web');
-      // wasm 资产目录：Task 10 把 onnxruntime-web/dist/*.wasm 拷到 dist/ort/
-      ort.env.wasm.wasmPaths = './ort/';
+      // wasm 资产（Task 10）：二进制按页面相对路径取 dist/ort/ort-wasm-simd-threaded.jsep.wasm
+      // （vite.config 的 ortWasmAssets 负责 build 拷贝 + dev 中间件，同路径）。
+      // 必须用对象形式 {wasm} 而非字符串前缀 './ort/'：字符串形式会让 ORT 绕过
+      // bundle 构建的内联 glue 工厂（za 快路径要求无 wasmPaths），转而在 ORT 模块
+      // 自身 URL（生产为 dist/assets/…js）旁动态 import 外部 glue，其路径随产物
+      // 布局漂移（实测 404 → 引擎未就绪）。对象形式 locateFile 恒为页面相对的
+      // ./ort/<wasm>，glue 走内联工厂零请求；dist/assets/ 下另备一份 glue 以防
+      // 同源快路径失效（见 vite.config ortWasmAssets）。
+      // 仅浏览器设置：node（vitest 注入假会话）不需要页面相对路径，且 ort.node 对
+      // 对象形式的 wasmPaths 会在初始化期按文件路径急切读盘 → ENOENT 未处理拒绝。
+      if (typeof window !== 'undefined') {
+        ort.env.wasm.wasmPaths = { wasm: './ort/ort-wasm-simd-threaded.jsep.wasm' };
+      }
       // 已定决策「精简单线程版」：单线程无需 SharedArrayBuffer/crossOriginIsolated
       ort.env.wasm.numThreads = 1;
       this.session = await ort.InferenceSession.create(this.modelUrl, {
