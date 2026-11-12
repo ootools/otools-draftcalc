@@ -14,6 +14,7 @@ import {
   LABELS,
   MockRecognizer,
   OrtRecognizer,
+  WarmupError,
   segmentClassify,
   setRecognizer,
 } from '../src/core/recognize';
@@ -102,6 +103,108 @@ describe('OrtRecognizer', () => {
   it('init 未完成/失败时 classify 同步抛 "识别引擎未就绪"', () => {
     const rec = new OrtRecognizer('/bad/recog.onnx');
     expect(() => rec.classify(new Float32Array(784))).toThrow(/识别引擎未就绪/);
+  });
+});
+
+describe('OrtRecognizer 预热与缓存（注入假 session；node 下无法创建真实 wasm 会话）', () => {
+  /** 17 维 logits：'5' 最强、'3' 次之、'8' 第三 → softmax top-3 确定性。 */
+  function logits538(): Float32Array {
+    const d = new Float32Array(17);
+    d[5] = 3;
+    d[3] = 2;
+    d[8] = 1;
+    return d;
+  }
+
+  type FakeSession = {
+    inputNames: string[];
+    outputNames: string[];
+    run: () => Promise<Record<string, { data: Float32Array }>>;
+  };
+
+  /** 测试缝：向私有 session 字段注入假会话（绕过 node 不可用的 wasm 初始化）。 */
+  function injectSession(rec: OrtRecognizer, run: FakeSession['run']): void {
+    (rec as unknown as { session: FakeSession }).session = {
+      inputNames: ['input'],
+      outputNames: ['logits'],
+      run,
+    };
+  }
+
+  function warmImg(): Float32Array {
+    const img = new Float32Array(784);
+    img[10] = 1;
+    return img;
+  }
+
+  it('首见图 classify 抛 WarmupError，前缀 "识别预热中："，区别于 "识别引擎未就绪"；热身后同图命中', async () => {
+    const rec = new OrtRecognizer();
+    injectSession(rec, async () => ({ logits: { data: logits538() } }));
+    const img = warmImg();
+
+    let err: unknown;
+    try {
+      rec.classify(img);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(WarmupError);
+    expect((err as Error).message.startsWith('识别预热中：')).toBe(true);
+    // 预热错不得携带故障前缀（T8 横幅的唯一判别信号）
+    expect((err as Error).message.includes('识别引擎未就绪')).toBe(false);
+
+    await rec.whenSettled(); // 等热身完成
+    expect(rec.classify(img).map((c) => c.label)).toEqual(['5', '3', '8']);
+  });
+
+  it('whenSettled：pending 推理未结束前不 resolve，结束后才 resolve；无 pending 时立即 resolve', async () => {
+    const rec = new OrtRecognizer();
+    await rec.whenSettled(); // 无 pending → 立即返回
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    injectSession(rec, async () => {
+      await gate;
+      return { logits: { data: logits538() } };
+    });
+    const img = warmImg();
+    expect(() => rec.classify(img)).toThrow(WarmupError); // 首见图 → 触发热身
+
+    let settled = false;
+    const waiting = rec.whenSettled().then(() => {
+      settled = true;
+    });
+    await new Promise((r) => setTimeout(r, 0)); // 冲刷微任务：推理仍被门控
+    expect(settled).toBe(false);
+
+    release();
+    await waiting; // resolve 时机 = 无 pending 后台推理
+    expect(settled).toBe(true);
+    expect(rec.classify(img).map((c) => c.label)).toEqual(['5', '3', '8']);
+  });
+
+  it('缓存命中返回副本：调用方原地修改返回值不影响后续同图调用', async () => {
+    const rec = new OrtRecognizer();
+    injectSession(rec, async () => ({ logits: { data: logits538() } }));
+    const img = warmImg();
+    await rec.classifyAsync(img);
+
+    const first = rec.classify(img);
+    expect(first.map((c) => c.label)).toEqual(['5', '3', '8']);
+    first.reverse();
+    first.push({ label: '0', prob: 1 });
+
+    const second = rec.classify(img);
+    expect(second).not.toBe(first);
+    expect(second.map((c) => c.label)).toEqual(['5', '3', '8']);
+    expect(second).toHaveLength(3);
+
+    // classifyAsync 命中/出栈路径同样返回副本
+    const third = await rec.classifyAsync(img);
+    third.reverse();
+    expect(rec.classify(img).map((c) => c.label)).toEqual(['5', '3', '8']);
   });
 });
 

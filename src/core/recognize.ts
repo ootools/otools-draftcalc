@@ -10,10 +10,15 @@
  *   OrtRecognizer 的取舍：
  *   - classify(img) 按「图内容 → 已完成结果」缓存同步返回；同图重复识别（T7 渐进书写
  *     下每笔重跑整行，未变化符号的归一化图逐位相同）全部缓存命中、纯同步；
- *   - 首次见到某图时同步触发后台推理（结果就绪即入缓存）并抛出
- *     '识别引擎未就绪：…' 错误 —— 绝不返回错位/过期候选（反目标：静默给错答案）；
+ *   - 首次见到某图时同步触发后台推理（结果就绪即入缓存）并抛出 WarmupError
+ *     （message 以 '识别预热中：' 开头）—— 绝不返回错位/过期候选（反目标：静默给错答案）；
+ *     T7 捕获后可 await whenSettled() 等热身完成、当拍内重跑同图（缓存即命中）；
  *   - 需要一次性拿到结果时用 await classifyAsync(img)（T8 可先预热再跑同步管线）。
- *   所有 OrtRecognizer 抛错统一以 '识别引擎未就绪：' 开头，T8 据此渲染就绪横幅。
+ *
+ *   错误前缀契约（T8 横幅唯一判别信号，不得混用）：
+ *   - '识别引擎未就绪：' —— 仅由故障路径抛出：init 失败 / 未 init / 无会话 /
+ *     运行中推理失败（classifyAsync 的 awaiter 收到）→ 渲染「识别引擎未就绪」横幅；
+ *   - '识别预热中：' —— 仅由首见图热身抛出（WarmupError，非故障，可 whenSettled 自愈）。
  */
 import type { InferenceSession } from 'onnxruntime-web';
 import type { ClassifyFn } from './segment';
@@ -71,6 +76,18 @@ export class MockRecognizer implements Recognizer {
 }
 
 /**
+ * 首见图热身错误：classify 触发的后台推理尚未完成、缓存未命中，非故障。
+ * 与故障前缀 '识别引擎未就绪：' 严格区分（T8 横幅判别依赖）；
+ * T7 可 instanceof 判断或匹配 message 前缀 '识别预热中：'，然后 await whenSettled() 重跑。
+ */
+export class WarmupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WarmupError';
+  }
+}
+
+/**
  * ONNX 识别器：onnxruntime-web wasm CPU 后端，模型 [1,1,28,28]→[1,17] logits。
  * init() 完成（resolve）后才可识别；init 失败统一抛 '识别引擎未就绪：…'（Review Focus 5）。
  */
@@ -104,8 +121,8 @@ export class OrtRecognizer implements Recognizer {
   }
 
   /**
-   * 同步识别：缓存命中（同图已推理过）直接返回 top-3；
-   * 未命中则触发后台推理并抛 '识别引擎未就绪：…'（语义与失败原因见文件头注释）。
+   * 同步识别：缓存命中（同图已推理过）直接返回 top-3 副本；
+   * 未命中则触发后台预热并抛 WarmupError（'识别预热中：…'，非故障 —— 契约见文件头）。
    */
   classify(img: Float32Array): Candidate[] {
     if (!this.session) {
@@ -113,21 +130,32 @@ export class OrtRecognizer implements Recognizer {
     }
     const key = imgKey(img);
     const cached = this.cache.get(key);
-    if (cached) return cached;
-    void this.classifyAsync(img).catch(() => {/* 失败经 classifyAsync 抛出 */});
-    throw new Error(
-      '识别引擎未就绪：该图首次识别需异步推理（await classifyAsync 后同图 classify 即同步命中）',
+    if (cached) return [...cached]; // 副本：防上游原地排序污染缓存（与 MockRecognizer 一致）
+    void this.classifyAsync(img).catch(() => {/* 失败经 classifyAsync 的 awaiter 抛出 */});
+    throw new WarmupError(
+      '识别预热中：该图首次识别，后台推理进行中（await whenSettled() 后重跑同图即命中缓存）',
     );
   }
 
-  /** 异步识别：softmax 后按 prob 降序取 top-3；同图并发去重。 */
+  /**
+   * 等待全部后台预热推理结束：resolve 时无 pending 后台推理（T7 捕获 WarmupError 后
+   * 当拍 await 本方法再重跑，缓存即命中）。等待期间新触发的预热会继续等待；
+   * 单个推理失败不使本方法 reject（失败详情由 classifyAsync 的 awaiter 获得）。
+   */
+  async whenSettled(): Promise<void> {
+    while (this.pending.size > 0) {
+      await Promise.allSettled([...this.pending.values()]);
+    }
+  }
+
+  /** 异步识别：softmax 后按 prob 降序取 top-3（返回副本，缓存数组不外泄）；同图并发去重。 */
   async classifyAsync(img: Float32Array): Promise<Candidate[]> {
     if (!this.session) {
       throw new Error('识别引擎未就绪：请先 await ort.init() 且成功后再识别');
     }
     const key = imgKey(img);
     const cached = this.cache.get(key);
-    if (cached) return cached;
+    if (cached) return [...cached];
     const inflight = this.pending.get(key);
     if (inflight) return inflight;
 
@@ -151,7 +179,7 @@ export class OrtRecognizer implements Recognizer {
         }
         const top = softmaxTop3(data);
         this.cache.set(key, top);
-        return top;
+        return [...top]; // 返回副本：缓存数组不外泄（与 classify/classifyAsync 命中路径一致）
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         throw new Error(`识别引擎未就绪：${msg}`);
