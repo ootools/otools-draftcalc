@@ -17,6 +17,10 @@
  *   前缀 '识别预热中：'）经注入 scheduler 同拍延迟重跑；同一行连续 5 次
  *   WarmupError 停止自动重跑（用户动作重置计数）；两阶段假识别器 +
  *   createPipeline 真实管线验证 catch-and-rerun 闭环。
+ *   补强（纠正持久化）：setAlt 写 overrides（glyph 归一化图 key → label），
+ *   createPipeline 的 labelOverride 注入在每次重跑对每个 glyph 重新应用 ——
+ *   纠正跨「追加新笔重跑 / rhs 续写重算」持久；循环切回原 top-1、clear 失效、
+ *   undo 不清（同图重写仍命中）。测试用晚期绑定装配（Task 8 同款模式）。
  */
 import { describe, expect, it } from 'vitest';
 import { createPipeline, LineManager, type LinePipeline } from '../src/core/lines';
@@ -910,5 +914,118 @@ describe('两阶段假识别器 + createPipeline：catch-and-rerun 闭环', () =
     scheduled.at(-1)!();
     expect(m.lines[0].status).toBe('done');
     expect(m.lines[0].result).toEqual({ type: 'compare', lhs: '2', rhs: '2', match: true });
+  });
+});
+
+// ---------------------------------------------------------------- 纠正持久化（setAlt 跨重跑）
+
+describe('纠正持久化：setAlt overrides 跨重跑不被 CNN top-1 覆盖', () => {
+  /**
+   * 真实 createPipeline + 晚期绑定纠正查询（lines.ts labelOverride 注释钉死的
+   * Task 8 装配模式）+ 注入 scheduler。classify 桩：任何图恒返回同一 top-3
+   * （top-1 '2'），与图像无关 → 重跑重分类结果可预言，纠正是否生效完全取决于
+   * override 命中。
+   */
+  function makeRealManager(): { m: LineManager; scheduled: Array<() => void> } {
+    const scheduled: Array<() => void> = [];
+    let manager: LineManager | null = null;
+    const pipeline = createPipeline(() => TOP3, 40, (img) => manager?.labelOverride(img) ?? null);
+    const m = new LineManager(pipeline, 40, (fn) => {
+      scheduled.push(fn);
+    });
+    manager = m;
+    return { m, scheduled };
+  }
+
+  // 恒定 top-3（与图像无关）：top-1 '2'，候选含 '3' '1'。
+  const TOP3 = [
+    { label: '2' as SymbolLabel, prob: 0.9 },
+    { label: '3' as SymbolLabel, prob: 0.07 },
+    { label: '1' as SymbolLabel, prob: 0.03 },
+  ];
+
+  // 三个互不相同、均进 classify 的形状（无几何合并，图内容各异）。
+  const shapeA = (): Stroke => vLine(20, 15, 45);
+  const shapeB = (): Stroke =>
+    polyline([
+      [50, 15],
+      [58, 45],
+      [50, 45],
+    ]);
+  const shapeRhs = (): Stroke =>
+    polyline([
+      [62, 15],
+      [72, 45],
+      [62, 45],
+    ]);
+
+  it('① writing 行纠正后追加新笔画重跑，纠正仍生效（同图重分类命中 override）', () => {
+    const { m } = makeRealManager();
+    m.addStroke(shapeA());
+    expect(m.lines[0].glyphs[0].label).toBe('2'); // 桩 top-1
+    expect(m.lines[0].glyphs[0].conf).toBeLessThan(1);
+    m.setAlt(1, 0, '3');
+    // 重算即命中：label=override，原 top-1 '2' 插入 alts 首位，conf 置 1
+    const g = m.lines[0].glyphs[0];
+    expect(g.label).toBe('3');
+    expect(g.alts).toEqual(['2', '3', '1']);
+    expect(g.conf).toBe(1);
+    // 追加新笔 → 整行重分割重分类 → A 的纠正仍生效，B 无纠正为 top-1
+    m.addStroke(shapeB());
+    expect(m.lines[0].glyphs.map((x) => x.label)).toEqual(['3', '2']);
+    expect(m.lines[0].glyphs[0].alts[0]).toBe('2'); // 仍可循环切回
+  });
+
+  it("② done(value) 行 rhs 续写重算，LHS 纠正仍生效（compare 用纠正后的 lhs）", () => {
+    const { m } = makeRealManager();
+    m.addStroke(shapeA());
+    m.addStroke(hLine(35, 55, 25)); // 单横 → fracbar（无 '=' → writing）
+    m.addStroke(hLine(35, 55, 31)); // 两横堆叠 → '=' → done value '2'
+    expect(m.lines[0].result).toEqual({ type: 'value', lhs: '2', value: '2' });
+    m.setAlt(1, 0, '3'); // LHS 纠正 → 重算 value '3'
+    expect(m.lines[0].result).toEqual({ type: 'value', lhs: '3', value: '3' });
+    // rhs 续写 → 重跑重分割 → LHS 纠正跨重跑持久 → compare('3','2') 不匹配
+    m.addStroke(shapeRhs());
+    const line = m.lines[0];
+    expect(line.glyphs[0].label).toBe('3');
+    expect(line.status).toBe('done');
+    expect(line.result).toEqual({ type: 'compare', lhs: '3', rhs: '2', match: false });
+  });
+
+  it('③ setAlt 循环切回原 top-1（override=原 label）→ label 复原、conf 置 1、不破坏后续重跑', () => {
+    const { m } = makeRealManager();
+    m.addStroke(shapeA());
+    m.setAlt(1, 0, '3');
+    expect(m.lines[0].glyphs[0].label).toBe('3');
+    m.setAlt(1, 0, '2'); // 用户循环候选切回原 top-1 → override 改写为 '2'
+    const g = m.lines[0].glyphs[0];
+    expect(g.label).toBe('2');
+    expect(g.conf).toBe(1); // override 命中（=原 label）同样置 1
+    expect(g.alts[0]).toBe('2'); // alts 含当前 label
+    // 再追加新笔重跑：override('2') 与 classify top-1 一致，纠正路径不引入偏差
+    m.addStroke(shapeB());
+    expect(m.lines[0].glyphs.map((x) => x.label)).toEqual(['2', '2']);
+  });
+
+  it('④ clear() 清空 overrides → 同图重写不再命中纠正', () => {
+    const { m } = makeRealManager();
+    m.addStroke(shapeA());
+    m.setAlt(1, 0, '3');
+    expect(m.lines[0].glyphs[0].label).toBe('3');
+    m.clear();
+    expect(m.lines.length).toBe(0);
+    m.addStroke(shapeA()); // 同形状 → 同图
+    expect(m.lines[0].glyphs[0].label).toBe('2'); // 纠正已随 clear 丢弃
+  });
+
+  it('⑤ undo/erase 移除笔画不清 overrides → 同图重写仍命中（图不变即持久）', () => {
+    const { m } = makeRealManager();
+    m.addStroke(shapeA());
+    m.setAlt(1, 0, '3');
+    expect(m.lines[0].glyphs[0].label).toBe('3');
+    m.undo(); // 唯一笔画被撤 → 行移除，overrides 保留
+    expect(m.lines.length).toBe(0);
+    m.addStroke(shapeA()); // 同图重写
+    expect(m.lines[0].glyphs[0].label).toBe('3'); // 纠正仍命中
   });
 });

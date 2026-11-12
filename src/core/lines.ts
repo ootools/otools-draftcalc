@@ -34,13 +34,23 @@
  * createPipeline：默认真实管线 = segmentGlyphs（行高取行内非退化笔画高度
  * 中位数，退化时回退默认行高）→ correctGlyphs（解析前 alts 纠错）→
  * parseEquation → evalEquation；eq 仅在行内含 '=' 时非 null。
+ *
+ * 纠正持久化（setAlt 跨重跑不被 CNN top-1 覆盖）：LineManager 内部维护
+ * overrides Map（key = glyph 归一化图内容，上限 500 条 FIFO 淘汰防无限增长），
+ * setAlt 写入后经 createPipeline 的 labelOverride 注入，在每次重跑时对
+ * segment 产出的【每个 glyph】重新应用：同图重分割/重分类一律命中纠正，
+ * 纠正跨 rhs 续写 / 擦除重开持久。命中时 label=override 值、原 top-1 插入
+ * alts 首位（用户可循环切回）、alts 始终含当前 label、conf 置 1（用户已确认）。
+ * 装配为晚期绑定（pipeline 先于 manager 构造，见 labelOverride 方法注释）。
+ * 生命周期：clear() 清空 overrides；undo/eraseAt 不清 —— 图不变仍命中，
+ * 笔画变了图自然变、旧 key 自然失效。
  */
 import { evalEquation, type EvalResult } from './evaluate';
 import { correctGlyphs } from './grammar';
 import { parseEquation } from './parse2d';
 import { segmentClassify } from './recognize';
 import { segmentGlyphs, type ClassifyFn } from './segment';
-import { bboxOf } from './strokes';
+import { bboxOf, normalizeGlyph } from './strokes';
 import type { BBox, Equation, Glyph, Stroke, SymbolLabel } from './types';
 
 // ---------------------------------------------------------------- 钉死接口
@@ -73,6 +83,8 @@ const MAX_CONSECUTIVE_WARMUP = 5;
 const RHS_Y_TOL = 1;
 /** 行高退化（无有效笔画高度）时的默认参考行高。 */
 const DEFAULT_LINE_HEIGHT = 40;
+/** 手工纠正 overrides 上限：超过后按插入序 FIFO 淘汰最旧（防无限增长）。 */
+const MAX_OVERRIDES = 500;
 
 // ---------------------------------------------------------------- LineManager
 
@@ -86,6 +98,8 @@ export class LineManager {
   private readonly scheduleRerun: (fn: () => void) => void;
   /** 行 id → 连续 WarmupError 次数（用户动作/成功重算归零）。 */
   private readonly warmupFailures = new Map<number, number>();
+  /** 手工纠正持久表：glyph 归一化图内容 key → 用户选定 label（FIFO 上限见 MAX_OVERRIDES）。 */
+  private readonly overrides = new Map<string, SymbolLabel>();
   private nextLineId = 1;
 
   constructor(
@@ -169,27 +183,53 @@ export class LineManager {
     }
   }
 
-  /** 全清空（行 id 重新从 1 计数，重试状态一并丢弃）。 */
+  /** 全清空（行 id 重新从 1 计数，重试状态与手工纠正一并丢弃）。 */
   clear(): void {
     this.lines.splice(0, this.lines.length);
     this.warmupFailures.clear();
+    this.overrides.clear();
     this.nextLineId = 1;
   }
 
   /**
-   * 候选纠正：替换该行第 glyphIndex 个 glyph 的 label（alts 同步收录新值，
-   * 供 UI 循环切换），随后仅重算该行。done 行重开时保留旧 result（重算成功
-   * 后按新 result 更新 status/result；失败则停在 writing + 旧 result）。
+   * 候选纠正：先把「该 glyph 归一化图 → 用户选定 label」写入 overrides（此后
+   * 同图重分割/重分类在重跑时一律命中，纠正跨续写/擦除持久），再替换该行
+   * 第 glyphIndex 个 glyph 的 label（alts 同步收录新值，供 UI 循环切换），
+   * 随后仅重算该行。done 行重开时保留旧 result（重算成功后按新 result 更新
+   * status/result；失败则停在 writing + 旧 result）。
    */
   setAlt(lineId: number, glyphIndex: number, label: SymbolLabel): void {
     const line = this.lines.find((l) => l.id === lineId);
     if (!line) return;
     const g = line.glyphs[glyphIndex];
     if (!g) return;
+    this.rememberOverride(imgKey(normalizeGlyph(g)), label);
     g.label = label;
     if (!g.alts.includes(label)) g.alts.unshift(label);
     this.reopenLine(line, /* keepResult */ true);
     this.recomputeLine(line);
+  }
+
+  /**
+   * 手工纠正查询（createPipeline 的 labelOverride 注入点）：该归一化图曾被
+   * setAlt 纠正过则返回纠正 label，否则 null。
+   * 装配模式（晚期绑定 —— pipeline 先于 manager 构造）：
+   *   let manager: LineManager | null = null;
+   *   const pipeline = createPipeline(classify, 40, (img) => manager?.labelOverride(img) ?? null);
+   *   manager = new LineManager(pipeline, lineHeightHint);
+   * 注意经箭头闭包引用（直接传 manager.labelOverride 会丢 this）。
+   */
+  labelOverride(img: Float32Array): SymbolLabel | null {
+    return this.overrides.get(imgKey(img)) ?? null;
+  }
+
+  /** 写入纠正：已存在则覆盖（不刷新 FIFO 位置）；超上限先淘汰最旧一条。 */
+  private rememberOverride(key: string, label: SymbolLabel): void {
+    if (!this.overrides.has(key) && this.overrides.size >= MAX_OVERRIDES) {
+      const oldest = this.overrides.keys().next();
+      if (oldest.done !== true) this.overrides.delete(oldest.value);
+    }
+    this.overrides.set(key, label);
   }
 
   // ------------------------------------------------------------ 内部：几何判定
@@ -260,17 +300,25 @@ export class LineManager {
 // ---------------------------------------------------------------- 真实管线
 
 /**
- * 默认 LinePipeline：segmentGlyphs → correctGlyphs → parseEquation → evalEquation。
+ * 默认 LinePipeline：segmentGlyphs → labelOverride 应用 → correctGlyphs →
+ * parseEquation → evalEquation。
  * 行高 = 行内非退化笔画（高度 > 0）的 bbox 高度中位数（偶数取上中位），全退化
  * （如整行只有横条）时回退 fallbackLineHeight；eq 仅在纠错后仍含 '=' 时非 null。
+ * labelOverride（可选）：对 segment 产出的每个 glyph 先按 normalizeGlyph 算图
+ * 查纠正，命中则改写 label（原 top-1 插入 alts 首位、alts 含当前 label、
+ * conf 置 1）后再做语法纠错 —— 纠正优先于语法启发式。
  */
 export function createPipeline(
   classify: ClassifyFn = segmentClassify(),
   fallbackLineHeight: number = DEFAULT_LINE_HEIGHT,
+  labelOverride?: (img: Float32Array) => SymbolLabel | null,
 ): LinePipeline {
   return {
     run(strokes: Stroke[]): { glyphs: Glyph[]; eq: Equation | null; result: EvalResult | null } {
-      const glyphs = correctGlyphs(segmentGlyphs(strokes, classify, lineHeightOf(strokes, fallbackLineHeight)));
+      const segmented = segmentGlyphs(strokes, classify, lineHeightOf(strokes, fallbackLineHeight));
+      const overridden =
+        labelOverride === undefined ? segmented : segmented.map((g) => applyLabelOverride(g, labelOverride));
+      const glyphs = correctGlyphs(overridden);
       if (!glyphs.some((g) => g.label === '=')) return { glyphs, eq: null, result: null };
       const eq = parseEquation(glyphs);
       return { glyphs, eq, result: evalEquation(eq) };
@@ -292,6 +340,31 @@ function lineHeightOf(strokes: Stroke[], fallback: number): number {
 }
 
 // ---------------------------------------------------------------- 小工具
+
+/**
+ * 手工纠正应用：查 labelOverride 命中（非 null）则
+ *   - label = override 值；o 与原 label 不同时，原 top-1 提到 alts 首位
+ *     （用户可循环切回），o 一并收进 alts（契约：alts 始终含当前 label）；
+ *   - conf 置 1（用户已确认的 label）。
+ * 未命中原样返回（不复制，segment 产出本为每次重跑新建）。
+ */
+function applyLabelOverride(g: Glyph, lookup: (img: Float32Array) => SymbolLabel | null): Glyph {
+  const o = lookup(normalizeGlyph(g));
+  if (o === null) return g;
+  if (o === g.label) return { ...g, conf: 1 };
+  const original = g.label;
+  return {
+    ...g,
+    label: o,
+    alts: [original, o, ...g.alts.filter((a) => a !== original && a !== o)],
+    conf: 1,
+  };
+}
+
+/** 图内容 key：normalizeGlyph 产出为 0/1 二值图，join(',') 稳定且无歧义（独立实现，不依赖 recognize.ts 私有实现）。 */
+function imgKey(img: Float32Array): string {
+  return img.join(',');
+}
 
 /** 行内第一个 '=' glyph（按 bbox.x0 最小，与 parseEquation 的切分语义一致）。 */
 function firstEqGlyph(glyphs: Glyph[]): Glyph | null {
