@@ -4,7 +4,10 @@
  * LineManager 只管行的生命周期与几何判定（分行 / rhs 续写 / 撤销 / 橡皮 /
  * 候选纠正），识别与求值全部经注入的 LinePipeline（依赖注入，测试用假实现）：
  *
- *   addStroke   → 笔画进当前 writing 行，随后【仅对该行】跑 pipeline；
+ *   addStroke   → 笔画进当前 writing 行，随后【仅对该行】跑 pipeline；末行
+ *                 done 时先判 rhs 续写（优先），再按 y 几何回落——新笔 y 中心
+ *                 落在某个仍为 writing 的行（bbox ±容差）内则路由回该行
+ *                 （P2：eraseAt 重开的非末行保持可达），否则开新行。
  *                 done 行永不重跑（Review Focus 4：几十行后单笔增量 O(该行)）。
  *   done 判定   → pipeline 返回 eq 非 null（契约：仅当行内含 '=' 时非 null）
  *                 → status='done'、result=pipeline 返回值（rhs 空 → value 型，
@@ -16,6 +19,8 @@
  *                 适用（规则 5：用户笔迹永不删除/覆盖）。其余一律开新行。
  *   undo/eraseAt → done 行重开（status='writing'、result 清 null）后重算；
  *                 撤 '=' 或擦 '=' 后重算 eq=null → 结果消失可续写（手测 ⑰）。
+ *                 undo 按全局追加序（strokeHistory）撤最后一笔，y 回落下可
+ *                 位于任意行，不假设其在末行。
  *   setAlt      → 替换 glyph label（alts 同步收录）后仅重算该行；done 行按
  *                 新 result 更新 status/result（手测 ⑲ 候选纠正即时重算）。
  *
@@ -79,8 +84,8 @@ export interface LinePipeline {
 const WARMUP_PREFIX = '识别预热中：';
 /** 同一行连续 WarmupError 自动重跑上限（含首次调用；防无限循环）。 */
 const MAX_CONSECUTIVE_WARMUP = 5;
-/** rhs 续写的 y 容差（px）：行 bbox y0/y1 外扩 1px 仍算该行。 */
-const RHS_Y_TOL = 1;
+/** 行 bbox y 范围判定容差（px）：rhs 续写与 writing 行 y 回落共用。 */
+const LINE_Y_TOL = 1;
 /** 行高退化（无有效笔画高度）时的默认参考行高。 */
 const DEFAULT_LINE_HEIGHT = 40;
 /** 手工纠正 overrides 上限：超过后按插入序 FIFO 淘汰最旧（防无限增长）。 */
@@ -100,6 +105,8 @@ export class LineManager {
   private readonly warmupFailures = new Map<number, number>();
   /** 手工纠正持久表：glyph 归一化图内容 key → 用户选定 label（FIFO 上限见 MAX_OVERRIDES）。 */
   private readonly overrides = new Map<string, SymbolLabel>();
+  /** 全局笔画追加序（undo 依据；y 回落下最后一笔可位于任意行）。 */
+  private readonly strokeHistory: Stroke[] = [];
   private nextLineId = 1;
 
   constructor(
@@ -113,10 +120,12 @@ export class LineManager {
   }
 
   /**
-   * 追加一笔：当前 writing 行存在则入该行；否则先判 done 尾行的 rhs 续写，
-   * 不满足续写一律开新行。随后仅对受影响的一行跑 pipeline。
+   * 追加一笔：当前 writing 行存在则入该行；末行 done 时先判 rhs 续写（优先），
+   * 不满足则按 y 几何回落到仍为 writing 的行（P2：eraseAt 重开的非末行可达），
+   * 仍无归属才开新行。随后仅对受影响的一行跑 pipeline。
    */
   addStroke(s: Stroke): void {
+    this.strokeHistory.push(s);
     const last = this.lines[this.lines.length - 1] ?? null;
     if (last !== null && last.status === 'writing') {
       last.strokes.push(s);
@@ -128,6 +137,12 @@ export class LineManager {
       last.status = 'writing';
       last.strokes.push(s);
       this.recomputeLine(last);
+      return;
+    }
+    const target = this.findWritingLineByY(s);
+    if (target !== null) {
+      target.strokes.push(s);
+      this.recomputeLine(target);
       return;
     }
     const line: LineState = {
@@ -142,14 +157,17 @@ export class LineManager {
   }
 
   /**
-   * 撤销全局最后一笔（按追加序，即最后一个非空行的最后一笔）。
-   * 该行若因此清空则整行移除；否则 done 行重开（writing、result 清 null）并重算。
+   * 撤销全局最后一笔（按追加序 strokeHistory；y 回落下该笔可位于任意行）。
+   * 所在行若因此清空则整行移除；否则 done 行重开（writing、result 清 null）并重算。
    */
   undo(): void {
-    for (let i = this.lines.length - 1; i >= 0; i--) {
+    const last = this.strokeHistory.pop();
+    if (last === undefined) return;
+    for (let i = 0; i < this.lines.length; i++) {
       const line = this.lines[i];
-      if (line.strokes.length === 0) continue;
-      line.strokes.pop();
+      const idx = line.strokes.findIndex((st) => st.id === last.id);
+      if (idx < 0) continue;
+      line.strokes.splice(idx, 1);
       if (line.strokes.length === 0) {
         this.lines.splice(i, 1);
         return;
@@ -163,18 +181,32 @@ export class LineManager {
   /**
    * 橡皮：删除笔画 bbox 与橡皮圆（圆心 pt、半径 r，相交判定取点到 bbox 的
    * 最近距离 ≤ r）相交的笔画，波及所有行；被擦空的行整行移除；其余受影响行
-   * done 重开（writing、result 清 null）后各重算一次。
+   * done 重开（writing、result 清 null）后各重算一次。被删笔画同步移出
+   * strokeHistory（undo 只撤仍在稿纸上的笔画）。
    */
   eraseAt(pt: { x: number; y: number }, r: number): void {
     const affected: LineState[] = [];
+    const removedIds = new Set<number>();
     for (const line of this.lines) {
       const before = line.strokes.length;
       if (before === 0) continue;
-      line.strokes = line.strokes.filter((st) => !strokeHitsCircle(st, pt, r));
-      if (line.strokes.length !== before) affected.push(line);
+      const kept: Stroke[] = [];
+      for (const st of line.strokes) {
+        if (strokeHitsCircle(st, pt, r)) removedIds.add(st.id);
+        else kept.push(st);
+      }
+      if (kept.length !== before) {
+        line.strokes = kept;
+        affected.push(line);
+      }
     }
     for (let i = this.lines.length - 1; i >= 0; i--) {
       if (this.lines[i].strokes.length === 0) this.lines.splice(i, 1);
+    }
+    if (removedIds.size > 0) {
+      for (let i = this.strokeHistory.length - 1; i >= 0; i--) {
+        if (removedIds.has(this.strokeHistory[i].id)) this.strokeHistory.splice(i, 1);
+      }
     }
     for (const line of affected) {
       if (!this.lines.includes(line)) continue; // 已擦空移除，无需重算
@@ -183,11 +215,12 @@ export class LineManager {
     }
   }
 
-  /** 全清空（行 id 重新从 1 计数，重试状态与手工纠正一并丢弃）。 */
+  /** 全清空（行 id 重新从 1 计数，重试状态、手工纠正与笔画历史一并丢弃）。 */
   clear(): void {
     this.lines.splice(0, this.lines.length);
     this.warmupFailures.clear();
     this.overrides.clear();
+    this.strokeHistory.length = 0;
     this.nextLineId = 1;
   }
 
@@ -206,6 +239,7 @@ export class LineManager {
     this.rememberOverride(imgKey(normalizeGlyph(g)), label);
     g.label = label;
     if (!g.alts.includes(label)) g.alts.unshift(label);
+    g.conf = 1; // 用户已确认的纠正：与 override 命中路径对齐（重跑失败窗口内同样以置信度 1 显示）
     this.reopenLine(line, /* keepResult */ true);
     this.recomputeLine(line);
   }
@@ -237,7 +271,7 @@ export class LineManager {
   /**
    * rhs 续写判定（规则 3/5，对 value/compare/error 型 done 行统一适用）：
    * 行 glyphs 存在 '=' glyph、新笔 x 中心 > '=' bbox.x1、y 中心在行 bbox
-   * y ±RHS_Y_TOL 内。'=' 取 bbox.x0 最小者（与 parseEquation 取第一个 '=' 一致）。
+   * y ±LINE_Y_TOL 内。'=' 取 bbox.x0 最小者（与 parseEquation 取第一个 '=' 一致）。
    */
   private isRhsContinuation(line: LineState, s: Stroke): boolean {
     const eq = firstEqGlyph(line.glyphs);
@@ -247,7 +281,25 @@ export class LineManager {
     const cy = (bb.y0 + bb.y1) / 2;
     if (cx <= eq.bbox.x1) return false;
     const lineBb = bboxOf(line.strokes);
-    return cy >= lineBb.y0 - RHS_Y_TOL && cy <= lineBb.y1 + RHS_Y_TOL;
+    return cy >= lineBb.y0 - LINE_Y_TOL && cy <= lineBb.y1 + LINE_Y_TOL;
+  }
+
+  /**
+   * y 几何回落（P2）：末行 done 且非续写时，新笔 y 中心若落在某个仍为
+   * writing 的行的 y 范围（bbox ±LINE_Y_TOL）内 → 路由回该行。典型场景：
+   * eraseAt 重开中间 done 行后，用户在该行补写 '='。多行命中取最靠后的
+   * （最近书写语境优先）；done 行不参与（对 done 行补写只走末行 rhs 续写）。
+   */
+  private findWritingLineByY(s: Stroke): LineState | null {
+    const bb = bboxOf([s]);
+    const cy = (bb.y0 + bb.y1) / 2;
+    for (let i = this.lines.length - 1; i >= 0; i--) {
+      const line = this.lines[i];
+      if (line.status !== 'writing' || line.strokes.length === 0) continue;
+      const lineBb = bboxOf(line.strokes);
+      if (cy >= lineBb.y0 - LINE_Y_TOL && cy <= lineBb.y1 + LINE_Y_TOL) return line;
+    }
+    return null;
   }
 
   // ------------------------------------------------------------ 内部：行生命周期

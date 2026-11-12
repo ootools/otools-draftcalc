@@ -25,8 +25,9 @@
 import { describe, expect, it } from 'vitest';
 import { createPipeline, LineManager, type LinePipeline } from '../src/core/lines';
 import type { EvalResult } from '../src/core/evaluate';
+import { bboxOf, normalizeGlyph } from '../src/core/strokes';
 import type { Equation, ExprNode, Glyph, Stroke, SymbolLabel } from '../src/core/types';
-import { hLine, polyline, vLine } from './helpers/synth';
+import { dot, hLine, polyline, vLine } from './helpers/synth';
 
 // ---------------------------------------------------------------- 假 pipeline
 
@@ -37,10 +38,12 @@ interface RunOut {
   result: EvalResult | null;
 }
 
-/** 可编程假 pipeline：按 queue 顺序逐次消费；耗尽后默认返回空 writing 输出。 */
+/** 可编程假 pipeline：按 queue 顺序逐次消费；耗尽后返回 defaultOut（未设置则空 writing 输出）。 */
 class FakePipeline implements LinePipeline {
   readonly calls: Stroke[][] = [];
   private script: Array<RunOut | Error> = [];
+  /** 脚本耗尽后的兜底输出（如 FIFO 上限测试需要每次重跑都回同一组 glyphs）。 */
+  defaultOut: RunOut | null = null;
 
   queue(...items: Array<RunOut | Error>): void {
     this.script.push(...items);
@@ -50,7 +53,7 @@ class FakePipeline implements LinePipeline {
     this.calls.push([...strokes]);
     const next = this.script.shift();
     if (next instanceof Error) throw next;
-    return next ?? { glyphs: [], eq: null, result: null };
+    return next ?? this.defaultOut ?? { glyphs: [], eq: null, result: null };
   }
 
   get callCount(): number {
@@ -111,45 +114,70 @@ const outCompare = (glyphs: Glyph[], lhs: string, rhs: string, match: boolean): 
 
 const WARMUP_ERR = (): Error => new Error('识别预热中：假识别器首见图，后台推理进行中');
 
-// ---- 标准 `12=` 行：4 笔（'1' '2' '=' 两条横线），glyph '=' bbox x1=62，行 bbox y [15,45] ----
+// ---- 标准 `12=` 行（可纵向平移 dy 以构造多行稿纸）：4 笔（'1' '2' '=' 两条横线），
+// ---- glyph '=' bbox x1=62，行 bbox y [15+dy, 45+dy] ----
 
-function strokes12Eq(): Stroke[] {
+function strokes12EqAt(dy: number): Stroke[] {
   return [
     polyline([
-      [10, 15],
-      [18, 45],
+      [10, 15 + dy],
+      [18, 45 + dy],
     ]),
     polyline([
-      [24, 15],
-      [34, 45],
+      [24, 15 + dy],
+      [34, 45 + dy],
     ]),
-    hLine(44, 62, 26),
-    hLine(44, 62, 34),
+    hLine(44, 62, 26 + dy),
+    hLine(44, 62, 34 + dy),
+  ];
+}
+
+function strokes12Eq(): Stroke[] {
+  return strokes12EqAt(0);
+}
+
+function glyphs12EqAt(dy: number): Glyph[] {
+  return [
+    gl('1', 10, 15 + dy, 18, 45 + dy),
+    gl('2', 24, 15 + dy, 34, 45 + dy),
+    gl('=', 44, 26 + dy, 62, 34 + dy),
   ];
 }
 
 function glyphs12Eq(): Glyph[] {
-  return [gl('1', 10, 15, 18, 45), gl('2', 24, 15, 34, 45), gl('=', 44, 26, 62, 34)];
+  return glyphs12EqAt(0);
 }
 
-/** rhs 续写一笔（'2'）：cx=80 > 62，cy=30 ∈ [14,46]。 */
-function rhsStroke(): Stroke {
+/** rhs 续写一笔（'2'）：cx=80 > 62，cy=30+dy ∈ [14+dy,46+dy]。 */
+function rhsStrokeAt(dy: number): Stroke {
   return polyline([
-    [75, 20],
-    [85, 40],
+    [75, 20 + dy],
+    [85, 40 + dy],
   ]);
 }
 
+function rhsStroke(): Stroke {
+  return rhsStrokeAt(0);
+}
+
+function glyphs12EqRhs2At(dy: number): Glyph[] {
+  return [...glyphs12EqAt(dy), gl('2', 75, 20 + dy, 85, 40 + dy)];
+}
+
 function glyphs12EqRhs2(): Glyph[] {
-  return [...glyphs12Eq(), gl('2', 75, 20, 85, 40)];
+  return glyphs12EqRhs2At(0);
 }
 
 /** 递进脚本建 done value 行 `12=`：前 3 笔 writing，第 4 笔完成出 46。返回实际笔画实例。 */
-function addValueLine(h: Harness): Stroke[] {
-  h.fp.queue(outWriting(), outWriting(), outWriting(), outValue(glyphs12Eq(), '12', '46'));
-  const strokes = strokes12Eq();
+function addValueRowAt(h: Harness, dy: number): Stroke[] {
+  h.fp.queue(outWriting(), outWriting(), outWriting(), outValue(glyphs12EqAt(dy), '12', '46'));
+  const strokes = strokes12EqAt(dy);
   for (const s of strokes) h.m.addStroke(s);
   return strokes;
+}
+
+function addValueLine(h: Harness): Stroke[] {
+  return addValueRowAt(h, 0);
 }
 
 // ---- 标准 `12=24` compare 行：6 笔 ----
@@ -643,6 +671,7 @@ describe('setAlt：候选纠正（规则 7）', () => {
     expect(fp.calls.at(-1)).toEqual([s1, s2]);
     expect(gs[1].label).toBe('3'); // setAlt 确实改写了 glyph label
     expect(gs[1].alts).toContain('3');
+    expect(gs[1].conf).toBe(1); // P3-3：直改路径同样置 conf=1（重跑失败窗口内以已确认置信度显示）
   });
 
   it('done 行 setAlt → 重算并按新 result 更新 status/result', () => {
@@ -1027,5 +1056,154 @@ describe('纠正持久化：setAlt overrides 跨重跑不被 CNN top-1 覆盖', 
     expect(m.lines.length).toBe(0);
     m.addStroke(shapeA()); // 同图重写
     expect(m.lines[0].glyphs[0].label).toBe('3'); // 纠正仍命中
+  });
+});
+
+// ---------------------------------------------------------------- P2：eraseAt 重开非末行后的可达性
+
+describe('P2：末行 done 时按 y 几何回落到仍为 writing 的行', () => {
+  /** 三条 done value 行（dy = 0/100/200）。 */
+  function threeDoneRows(h: Harness): Stroke[][] {
+    return [addValueRowAt(h, 0), addValueRowAt(h, 100), addValueRowAt(h, 200)];
+  }
+
+  /** 擦掉中间行（dy=100）的两条 '=' 横线：圆心 (53,130) r=10 距两横各 4，距数字 bbox ≥ 19。 */
+  function eraseMiddleEq(h: Harness): void {
+    h.fp.queue(outWriting()); // 擦除重算：L2 剩两个数字，无 '=' → writing
+    h.m.eraseAt({ x: 53, y: 130 }, 10);
+  }
+
+  it("擦中间行 '=' 后在该行 y 范围补写 '=' → 该行重算 done，前后行不受影响", () => {
+    const { fp, m } = makeManager();
+    const rows = threeDoneRows({ fp, m, scheduled: [] });
+    eraseMiddleEq({ fp, m, scheduled: [] });
+    expect(fp.callCount).toBe(13); // 3 行 × 4 笔 + 1 次擦除重算
+    expect(m.lines.length).toBe(3);
+    const l2 = m.lines[1];
+    expect(l2.status).toBe('writing'); // 重开
+    expect(l2.result).toBeNull();
+    expect(l2.strokes.length).toBe(2);
+    // 补写 '=' 第一横：末行 L3 done，cx=53 ≤ 62 非续写；y 中心 126 ∈ L2 [114,146] → 路由回 L2
+    fp.queue(outWriting());
+    m.addStroke(hLine(44, 62, 126));
+    expect(m.lines.length).toBe(3);
+    expect(m.lines[1].strokes.length).toBe(3);
+    expect(m.lines[2].status).toBe('done'); // 末行不受影响
+    // 补写第二横 → L2 重算 done value 46
+    fp.queue(outValue(glyphs12EqAt(100), '12', '46'));
+    m.addStroke(hLine(44, 62, 134));
+    expect(l2.status).toBe('done');
+    expect(l2.result).toEqual({ type: 'value', lhs: '12', value: '46' });
+    expect(l2.strokes.length).toBe(4);
+    expect(fp.calls.at(-1)).toEqual(l2.strokes);
+    expect(m.lines[0].strokes).toEqual(rows[0]); // 前行不受影响
+    expect(m.lines[2].strokes).toEqual(rows[2]); // 后行不受影响
+  });
+
+  it('反例：y 不落在任何 writing 行 → 开新行', () => {
+    const { fp, m } = makeManager();
+    threeDoneRows({ fp, m, scheduled: [] });
+    eraseMiddleEq({ fp, m, scheduled: [] });
+    const before = fp.callCount;
+    fp.queue(outWriting());
+    const s = polyline([
+      [5, 300],
+      [13, 330],
+    ]); // cy=315 远离 L2 [114,146]；cx=9 也非任何续写
+    m.addStroke(s);
+    expect(m.lines.length).toBe(4); // 开新行
+    expect(m.lines[3].strokes).toEqual([s]);
+    expect(m.lines[3].status).toBe('writing');
+    expect(m.lines[1].strokes.length).toBe(2); // L2 未被误路由
+    expect(fp.callCount).toBe(before + 1);
+  });
+
+  it('优先级：末行 done 的 rhs 续写优先于 y 回落（右侧新笔进末行续写，不误入中间 writing 行）', () => {
+    const { fp, m } = makeManager();
+    threeDoneRows({ fp, m, scheduled: [] });
+    eraseMiddleEq({ fp, m, scheduled: [] }); // L2 writing
+    fp.queue(outCompare(glyphs12EqRhs2At(200), '12', '2', false));
+    m.addStroke(rhsStrokeAt(200)); // cx=80 > 62 且 cy=230 ∈ L3 [214,246]
+    expect(m.lines.length).toBe(3);
+    const l3 = m.lines[2];
+    expect(l3.status).toBe('done'); // 续写重算后 done
+    expect(l3.result).toEqual({ type: 'compare', lhs: '12', rhs: '2', match: false });
+    expect(l3.strokes.length).toBe(5);
+    expect(m.lines[1].strokes.length).toBe(2); // L2 未被误路由
+  });
+
+  it('undo 按全局追加序：回落写入中间行的新笔被撤销，随后仍可重新回落', () => {
+    const { fp, m } = makeManager();
+    threeDoneRows({ fp, m, scheduled: [] });
+    eraseMiddleEq({ fp, m, scheduled: [] });
+    fp.queue(outWriting(), outWriting());
+    const bar = hLine(44, 62, 126);
+    m.addStroke(bar); // y 回落 → L2
+    expect(m.lines[1].strokes.length).toBe(3);
+    m.undo(); // 撤销的正是 L2 里这笔（全局最后一笔），而非末行 L3
+    expect(m.lines.length).toBe(3);
+    expect(m.lines[1].strokes.length).toBe(2);
+    expect(m.lines[1].status).toBe('writing');
+    expect(m.lines[2].status).toBe('done'); // 末行未被误撤
+    expect(m.lines[2].strokes.length).toBe(4);
+    // 再写仍可回落
+    fp.queue(outValue(glyphs12EqAt(100), '12', '46'));
+    m.addStroke(hLine(44, 62, 134));
+    expect(m.lines[1].strokes.length).toBe(3); // 剩 2 数字 + 新横
+    expect(m.lines[1].status).toBe('done'); // fake 脚本直接给 eq 非 null → 按规则 2 判 done
+    expect(m.lines[1].result).toEqual({ type: 'value', lhs: '12', value: '46' });
+  });
+});
+
+// ---------------------------------------------------------------- P3-1：overrides FIFO 上限
+
+describe('P3-1：overrides 500 条 FIFO 上限与覆盖不刷新位置', () => {
+  /**
+   * 夹具 glyph：左右锚定竖线（x=2 / x=22，bbox 恒为 20×18 → normalizeGlyph
+   * s=1.0、offX/offY 恒定，无居中补偿）+ 横杠（长度 10..18 × 行 2..18）+
+   * 小点（4 列位置）。像素级差异一一映射到栅格，502 个图 key 两两互异
+   * （下方有夹具自检断言；组合空间 9×17×4=612）。
+   */
+  function mkGlyph(strokes: Stroke[]): Glyph {
+    return { strokes, bbox: bboxOf(strokes), label: '2', alts: ['2'], conf: 0.9 };
+  }
+
+  function capFixtureGlyphs(count: number): Glyph[] {
+    const out: Glyph[] = [];
+    for (let i = 0; i < count; i++) {
+      const w = 10 + (i % 9); // 10..18
+      const r = Math.floor(i / 9) % 17; // 0..16
+      const c = Math.floor(i / 153); // 0..3
+      out.push(mkGlyph([vLine(2, 2, 20), vLine(22, 2, 20), hLine(2, 2 + w, 2 + r), dot(3 + c * 4, 15)]));
+    }
+    return out;
+  }
+
+  it('写 501 个不同图 override → 首个失效、第 2 个仍命中；覆盖同 key 不淘汰、不刷新位置', () => {
+    const { fp, m } = makeManager();
+    const glyphs = capFixtureGlyphs(502);
+    const imgOf = (idx: number): Float32Array => normalizeGlyph(glyphs[idx]);
+    // 夹具自检：502 个图 key 两两互异（FIFO 断言的前提）
+    expect(new Set(glyphs.map((g) => normalizeGlyph(g).join(','))).size).toBe(502);
+    fp.defaultOut = { glyphs, eq: null, result: null }; // 每次重跑都回同一组 glyphs
+    m.addStroke(
+      polyline([
+        [100, 100],
+        [110, 130],
+      ]),
+    );
+    expect(m.lines[0].glyphs.length).toBe(502);
+    for (let i = 0; i <= 500; i++) m.setAlt(1, i, '3'); // 写入 501 个不同图 override
+    expect(m.labelOverride(imgOf(0))).toBeNull(); // 首个被 FIFO 淘汰
+    expect(m.labelOverride(imgOf(1))).toBe('3'); // 第 2 个仍命中
+    expect(m.labelOverride(imgOf(500))).toBe('3');
+    // 同 key 重复 setAlt：仅覆盖（不淘汰、Map 位置不刷新）
+    m.setAlt(1, 1, '9');
+    expect(m.labelOverride(imgOf(1))).toBe('9');
+    expect(m.labelOverride(imgOf(500))).toBe('3'); // 覆盖未触发淘汰
+    m.setAlt(1, 501, '3'); // 第 502 个不同图 → 淘汰最旧
+    expect(m.labelOverride(imgOf(1))).toBeNull(); // 覆盖未刷新位置 → key1 仍是最旧被淘汰
+    expect(m.labelOverride(imgOf(2))).toBe('3'); // key2 未被误淘汰（若刷新位置则被淘汰的会是 key2）
+    expect(m.labelOverride(imgOf(501))).toBe('3');
   });
 });
