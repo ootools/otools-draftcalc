@@ -17,4 +17,4 @@
 
 ## 模型训练数据
 
-识别模型 `public/model/recog.onnx` 的训练数据来自 [bhmsds](https://github.com/wblachowski/bhmsds)（Benchmark of Handwritten Mathematical Symbols Dataset，MIT，Copyright (c) 2019 wblachowski），文本存于 `licenses/bhmsds-LICENSE`。`(`、`)`、`sqrt` 三类为参数化合成样本（`training/synth.py`）。**未使用 MNIST**（数字直接取 bhmsds 的 0-9）。
+识别模型 `public/model/recog.onnx` 的训练数据来自 [bhmsds](https://github.com/wblachowski/bhmsds)（Basic Handwritten Math Symbols Dataset，MIT，Copyright (c) 2019 wblachowski），文本存于 `licenses/bhmsds-LICENSE`。`(`、`)`、`sqrt` 三类为参数化合成样本（`training/synth.py`）。**未使用 MNIST**（数字直接取 bhmsds 的 0-9）。

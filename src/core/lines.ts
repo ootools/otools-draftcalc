@@ -401,7 +401,9 @@ export function createPipeline(
         try {
           return classify(img);
         } catch (e) {
-          if (e instanceof WarmupError) {
+          // WarmupError 实例或 '识别预热中：' 前缀（recognize.ts 契约的两种信号，
+          // 测试假识别器常用前缀形式）均按预热处理；其余错误原样上抛。
+          if (e instanceof WarmupError || (e instanceof Error && e.message.startsWith(WARMUP_PREFIX))) {
             missing.push(img);
             return [{ label: '0', prob: 1 }];
           }

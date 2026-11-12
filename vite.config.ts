@@ -37,18 +37,22 @@ function ortWasmAssets(): PluginOption {
   return {
     name: 'otools-ort-wasm-assets',
     configureServer(server) {
-      // dev：/ort/* → node_modules/onnxruntime-web/dist/<运行时文件>
+      // dev：/ort/* → node_modules/onnxruntime-web/dist/<运行时文件>。
+      // connect 已剥掉 '/ort' 前缀，req.url 形如 '/ort-wasm-simd-threaded.jsep.wasm'。
+      // 先按【未解码】名过白名单再解码：decodeURIComponent 对畸形转义（如 /ort/%zz）
+      // 抛 URIError 会打崩 dev server；白名单均为无转义的字面文件名，命中后解码恒安全。
+      // 本仓库无 vite.config 测试基建，该行为按 SPEC「发版注意」手工冒烟（curl /ort/%zz）。
       server.middlewares.use('/ort', (req, res, next) => {
-        // connect 已剥掉 '/ort' 前缀，req.url 形如 '/ort-wasm-simd-threaded.jsep.wasm'
-        const name = decodeURIComponent(String(req.url ?? '').split('?')[0].replace(/^\//, ''));
-        const full = join(ortDist, name);
+        const raw = String(req.url ?? '').split('?')[0].replace(/^\//, '');
         if (
-          name !== ORT_WASM_BINARY &&
-          !(ORT_GLUE_FILES as readonly string[]).includes(name) &&
-          name !== 'ort-wasm-simd-threaded.wasm'
+          raw !== ORT_WASM_BINARY &&
+          !(ORT_GLUE_FILES as readonly string[]).includes(raw) &&
+          raw !== 'ort-wasm-simd-threaded.wasm'
         ) {
           return next();
         }
+        const name = decodeURIComponent(raw);
+        const full = join(ortDist, name);
         if (!existsSync(full)) return next();
         res.setHeader('Content-Type', name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript');
         createReadStream(full).pipe(res);

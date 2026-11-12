@@ -25,9 +25,10 @@
 import { describe, expect, it } from 'vitest';
 import { createPipeline, LineManager, type LinePipeline } from '../src/core/lines';
 import type { EvalResult } from '../src/core/evaluate';
+import { WarmupError } from '../src/core/recognize';
 import { bboxOf, normalizeGlyph } from '../src/core/strokes';
 import type { Equation, ExprNode, Glyph, Stroke, SymbolLabel } from '../src/core/types';
-import { dot, hLine, polyline, vLine } from './helpers/synth';
+import { cross, dot, hLine, polyline, vLine } from './helpers/synth';
 
 // ---------------------------------------------------------------- 假 pipeline
 
@@ -943,6 +944,138 @@ describe('两阶段假识别器 + createPipeline：catch-and-rerun 闭环', () =
     scheduled.at(-1)!();
     expect(m.lines[0].status).toBe('done');
     expect(m.lines[0].result).toEqual({ type: 'compare', lhs: '2', rhs: '2', match: true });
+  });
+});
+
+// ---------------------------------------------------------------- 批量预热回归钉（Task 10 集成修复）
+
+/**
+ * 批量预热回归钉：真实引擎集成（Task 10）发现逐图预热缺陷 —— segmentGlyphs 在
+ * 首个未缓存 glyph 处抛 WarmupError 中止整次分割，若 createPipeline 不做批量收集，
+ * 每轮重跑只会触发【一个】新图的后台推理，且 Burst 期间后续 run 全部在同一张
+ * in-flight 图上空转（无进展）；N 符号的行需要 N 轮重跑，超过
+ * MAX_CONSECUTIVE_WARMUP=5 后行永久卡 writing。本组用例钉死 createPipeline 的
+ * 「一轮扫描收集全部未缓存图（占位 label 绝不外泄）→ whenSettled 后一轮重跑全命中」
+ * 行为：两个用例在批量预热实现下通过，在逐图预热旧实现下必挂
+ * （首轮 started 仅 1 张 / 重跑轮数超出 5 次上限），对 classify 调用序重构敏感。
+ */
+describe('批量预热回归钉：createPipeline 一轮收集全部未缓存图', () => {
+  /**
+   * 模拟 OrtRecognizer 语义的假识别器：首见图抛 WarmupError 并立即开始"后台推理"
+   * （pending），whenSettled() 等全部推理完成落缓存。started 记录已触发推理的图 key。
+   */
+  class BatchWarmRecognizer {
+    private readonly cache = new Map<string, SymbolLabel>();
+    private readonly pending = new Map<string, Promise<void>>();
+    readonly started = new Set<string>();
+
+    constructor(private readonly labelOf: (img: Float32Array) => SymbolLabel) {}
+
+    classify(img: Float32Array): { label: SymbolLabel; prob: number }[] {
+      const key = img.join(',');
+      const hit = this.cache.get(key);
+      if (hit !== undefined) return [{ label: hit, prob: 1 }];
+      if (!this.pending.has(key)) {
+        this.started.add(key);
+        const task = new Promise<void>((resolve) => setTimeout(resolve, 0))
+          .then(() => this.cache.set(key, this.labelOf(img)))
+          .finally(() => this.pending.delete(key));
+        this.pending.set(key, task);
+      }
+      throw new WarmupError('识别预热中：该图首次识别，后台推理进行中');
+    }
+
+    async whenSettled(): Promise<void> {
+      while (this.pending.size > 0) await Promise.allSettled([...this.pending.values()]);
+    }
+  }
+
+  // "1+2+3+4+5="：5 个形状互异的数字（归一化图两两不同）+ 4 个共享同一归一化图的 +
+  // + 几何 '='。间距 ≥10px 保证 bbox 不相交（近邻不合并），同基线无上标歧义。
+  const strokes: Stroke[] = [
+    vLine(15, 15, 45), // 1
+    ...cross(47, 30, 10), // +
+    polyline([
+      [80, 15],
+      [100, 15],
+      [100, 30],
+      [80, 30],
+      [80, 45],
+      [100, 45],
+    ]), // 2
+    ...cross(120, 30, 10), // +
+    polyline([
+      [150, 15],
+      [170, 15],
+      [170, 45],
+      [150, 45],
+    ]), // 3
+    ...cross(195, 30, 10), // +
+    polyline([
+      [225, 15],
+      [235, 45],
+      [245, 15],
+    ]), // 4
+    ...cross(270, 30, 10), // +
+    polyline([
+      [300, 15],
+      [320, 15],
+      [320, 45],
+    ]), // 5
+    hLine(350, 375, 25), // =
+    hLine(350, 375, 31),
+  ];
+  // 每个 CNN glyph 的期望标签：按 segment.classifyGroup 同一口径现算归一化图 key
+  // （group 笔画 + bboxOf），保证与真实 classify 收到的图逐位一致。
+  const cnnGlyphs: Array<{ strokes: Stroke[]; label: SymbolLabel }> = [
+    { strokes: [strokes[0]], label: '1' },
+    { strokes: [strokes[1], strokes[2]], label: '+' },
+    { strokes: [strokes[3]], label: '2' },
+    { strokes: [strokes[4], strokes[5]], label: '+' },
+    { strokes: [strokes[6]], label: '3' },
+    { strokes: [strokes[7], strokes[8]], label: '+' },
+    { strokes: [strokes[9]], label: '4' },
+    { strokes: [strokes[10], strokes[11]], label: '+' },
+    { strokes: [strokes[12]], label: '5' },
+  ];
+  const labelByKey = new Map<string, SymbolLabel>();
+  for (const g of cnnGlyphs) {
+    labelByKey.set(normalizeGlyph({ strokes: g.strokes, bbox: bboxOf(g.strokes) }).join(','), g.label);
+  }
+  /** 互异归一化图数：5 个数字 + 4 个 + 共享 1 张图 = 6（> 5 次重跑上限的判别规模）。 */
+  const DISTINCT_IMAGES = labelByKey.size;
+
+  it('首轮 run 抛 1 次 WarmupError 且一轮收集全部互异图；whenSettled 后二轮全命中出结果', async () => {
+    const rec = new BatchWarmRecognizer((img) => labelByKey.get(img.join(',')) ?? '1');
+    const pipeline = createPipeline((img) => rec.classify(img));
+    // 首轮：恰 1 次预热错误（批量收集后统一抛出）；全部互异图都已触发后台推理。
+    // 旧实现（逐图预热）首轮只 started 1 张 → 此断言必挂。
+    expect(() => pipeline.run(strokes)).toThrow(WarmupError);
+    expect(rec.started.size).toBe(DISTINCT_IMAGES);
+    expect(rec.started.size).toBe(6);
+    // 等后台推理全部落缓存（OrtRecognizer.whenSettled 同款语义）
+    await rec.whenSettled();
+    // 二轮：全部缓存命中 → 直接成功出结果（旧实现二轮会在下一张未缓存图处再抛）。
+    const out = pipeline.run(strokes);
+    expect(out.eq).not.toBeNull();
+    expect(out.result).toEqual({ type: 'value', lhs: '1+2+3+4+5', value: '15' });
+  });
+
+  it('LineManager 全链路：whenSettled 感知调度器一轮重跑即 done（旧实现被 5 次上限卡死）', async () => {
+    const rec = new BatchWarmRecognizer((img) => labelByKey.get(img.join(',')) ?? '1');
+    const scheduled: Array<() => void> = [];
+    const m = new LineManager(createPipeline((img) => rec.classify(img)), 40, (fn) => scheduled.push(fn));
+    for (const s of strokes) m.addStroke(s);
+    expect(m.lines[0].status).toBe('writing');
+    // 应用同款 whenSettled 感知调度：等后台推理全部落缓存后同拍重跑。
+    // 新实现：第一轮重跑全命中 → done；旧实现：每轮只推进 1 图，4 轮可调度重跑
+    // （第 5 次 WarmupError 触顶）后无进展，10 轮循环内必不可能 done。
+    for (let i = 0; i < 10 && m.lines[0].status !== 'done'; i++) {
+      await rec.whenSettled();
+      for (const fn of scheduled.splice(0)) fn();
+    }
+    expect(m.lines[0].status).toBe('done');
+    expect(m.lines[0].result).toEqual({ type: 'value', lhs: '1+2+3+4+5', value: '15' });
   });
 });
 

@@ -143,3 +143,4 @@ network 审计全程无 404（wasm/model/glue 全 200）、无控制台致命错
 - 发布流程（AGENTS.md 权威）：build → pack → verify → GitHub Release（tag `plugin-otools-draftcalc-v0.1.0`，附 .oplg）→ `publish-market.mjs`（AUTH_MODE=pat，PAT 取 `xyito/config/ps-pro/pat.txt`，日志脱敏）
 - 提交信息 conventional commits，不带 AI 署名；不要在 xyito 层提交子模块指针
 - 第三方许可见 `THIRD_PARTY_NOTICES.md` 与 `licenses/`
+- `vite.config.ts` 的 `ortWasmAssets` dev 中间件无自动化测试基建（vitest 仅覆盖 `src/core`）：其「未解码名白名单 → 再解码」的顺序防畸形转义（`/ort/%zz`）打崩 dev server，改动该中间件后须手工冒烟 `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6547/ort/%zz`，应得 404（白名单外直通 vite）而非 dev server 崩溃
