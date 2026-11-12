@@ -1,0 +1,26 @@
+{
+  "uuid": "otools-draftcalc",
+  "packid": "otools-draftcalc",
+  "displayName": "Draft Calculator",
+  "displayNameCN": "稿纸计算器",
+  "developerName": "OTools",
+  "summary": "稿纸上手写算式自动识别计算：四则、分数、乘方、根号，写完等号即出结果，验算自动打分。",
+  "version": "0.1.0",
+  "entry": "dist/index.html",
+  "devUrl": "http://127.0.0.1:6547",
+  "quickDev": true,
+  "hasAd": false,
+  "inPluginPurchase": false,
+  "openInBrowser": false,
+  "logo": "logo.svg",
+  "icon": "🧮",
+  "screenshots": [],
+  "key": [
+    "稿纸",
+    "计算器",
+    "手写",
+    "草稿",
+    "验算",
+    "calculator"
+  ]
+}

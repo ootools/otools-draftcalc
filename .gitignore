@@ -1,0 +1,7 @@
+node_modules/
+/dist/
+/dist-pack/
+/training/data/
+/training/.venv/
+/training/out/
+*.log

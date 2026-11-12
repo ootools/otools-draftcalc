@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/ootools/otools-plugin-sdk",
+  "commit": "735618ea7664ef0b6f93d512fb639e67dda31db9",
+  "baseCommit": "b0bbcd98b2df04f0d84aaa2430147391e1853e18",
+  "contents": "package.json, dist, LICENSE, README.md",
+  "reason": "Pinned SDK with direct Panel color selection, freezeScreen mode, and awaited host clipboard routing.",
+  "changesFromBase": "sdk-direct-launch.patch",
+  "patchSha256": "6c04675402ea384d8fc41727af793c33367580775b880510882f3a4f6ef76ac8"
+}

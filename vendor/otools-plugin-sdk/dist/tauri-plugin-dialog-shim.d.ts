@@ -1,0 +1,13 @@
+import { OToolsDialogConfirmOptions, OToolsDialogFilter, OToolsDialogMessageOptions, OToolsDialogOpenOptions, OToolsDialogSaveOptions } from './otools-globals';
+export type DialogFilter = OToolsDialogFilter;
+export type OpenDialogOptions = OToolsDialogOpenOptions;
+export type SaveDialogOptions = OToolsDialogSaveOptions;
+export type MessageDialogOptions = OToolsDialogMessageOptions;
+export type ConfirmDialogOptions = OToolsDialogConfirmOptions;
+type OpenDialogReturn<T extends OpenDialogOptions> = T["multiple"] extends true ? string[] | null : string | null;
+export declare function open<T extends OpenDialogOptions>(options?: T): Promise<OpenDialogReturn<T>>;
+export declare function save(options?: SaveDialogOptions): Promise<string | null>;
+export declare function message(messageText: string, options?: string | MessageDialogOptions): Promise<void>;
+export declare function confirm(messageText: string, options?: string | ConfirmDialogOptions): Promise<boolean>;
+export declare function ask(messageText: string, options?: string | ConfirmDialogOptions): Promise<boolean>;
+export {};

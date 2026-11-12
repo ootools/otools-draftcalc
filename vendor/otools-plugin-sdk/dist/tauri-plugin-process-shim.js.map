@@ -1,0 +1,1 @@
+{"version":3,"file":"tauri-plugin-process-shim.js","sources":["../src/tauri-plugin-process-shim.ts"],"sourcesContent":["export async function relaunch() {\n  if (typeof window !== \"undefined\") {\n    window.location.reload();\n  }\n}\n"],"names":["relaunch"],"mappings":"AAAA,eAAsBA,IAAW;AAC/B,EAAI,OAAO,SAAW,OACpB,OAAO,SAAS,OAAA;AAEpB;"}
