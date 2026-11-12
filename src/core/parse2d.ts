@@ -35,7 +35,8 @@
  *   最高者为基线锚点（上标/降级横线不会是层内最高的 plain；无 plain token 时
  *   退化为全体最高者），取「高度 ≥ 0.6×锚点」子集的中位数 —— 层内小 glyph 达到
  *   半数以上时（2^10、2^100）全集中位数会被上标拉低而失效，较高子集对上标
- *   数量不敏感；0.7× 临界上标仍归基线（此时它参与主高子集、抬高估计）。
+ *   数量不敏感。底数为 node、plain 全是上标小字时（(1/2)²³，复审 P2）plain
+ *   锚点会塌缩，此时改用全体最高者重锚；重锚后 0.7× 全体最高者仍必然归基线。
  * - 所有递归都作用在严格缩小的 token 子集上，必然终止；无 DOM 依赖。
  */
 import type { BBox, Equation, ExprNode, Glyph, SymbolLabel } from './types';
@@ -101,6 +102,10 @@ const tokBBox = (t: Tok): BBox => (t.kind === 'plain' ? t.g.bbox : t.bbox);
  * 基线主高：该层非上标 glyph 高度中位数的估计。
  * 以 plain glyph 的最高者为锚点（无 plain token 时用全体最高者），
  * 取「高度 ≥ 0.6×锚点」子集的中位数。
+ * 复审修正：底数为 node、层内 plain 全是上标小字时（(1/2)²³），plain 锚点会
+ * 塌缩到上标高度致上标判定失效 —— 此时（plainMax < 0.6×全体最高）改用全体
+ * 最高者重估锚点。重锚后高度门槛为 0.6×全体最高，任何 ≥0.7×全体最高的 glyph
+ * 必然过不了门槛（0.7× 临界归基线的不变量不受重锚影响）。
  */
 function mainHeight(tokens: Tok[]): number {
   const allHs = tokens.map((t) => hOf(tokBBox(t)));
@@ -108,7 +113,9 @@ function mainHeight(tokens: Tok[]): number {
   const plainHs = tokens
     .filter((t): t is PlainTok => t.kind === 'plain')
     .map((t) => hOf(t.g.bbox));
-  const anchor = Math.max(...(plainHs.length > 0 ? plainHs : allHs));
+  const allMax = Math.max(...allHs);
+  let anchor = plainHs.length > 0 ? Math.max(...plainHs) : allMax;
+  if (anchor < 0.6 * allMax) anchor = allMax;
   const mains = allHs.filter((h) => h >= 0.6 * anchor);
   return median(mains.length > 0 ? mains : allHs);
 }
