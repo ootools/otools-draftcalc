@@ -6,12 +6,13 @@
  * 两阶段化后编号顺序在各阶段内仍保持：
  *
  *   Phase A 多笔合并（按编号序 1 → 4 → 5 → 6，命中即消耗笔画）：
- *     1. 两横条上下叠且 x 区间重叠 → '='（conf=1，alts=[]，不打分类器）
+ *     1. 两横条上下叠且 x 区间重叠 → '='（conf=1，alts=['=']，不打分类器）
  *     4. 横杠 + 上下两点（点心在杠 x 区间内、分别上下邻近）→ 合并交 classify（预期 '/'）
- *     5. 两笔对角交叉（各自非点/非横条、h/w<3、bbox 相交且中心互偏）→ 合并交 classify（预期 '*'）
- *     6. 横竖交叉（横条与竖条互相贯穿对方带宽）→ 合并交 classify（预期 '+'）
+ *     5. 两笔对角交叉（各自非点/非横条、身高宽比 <3、bbox 相交且互不平行）→ 合并交 classify（预期 '*'）
+ *     6. 横竖交叉（横/竖条互相覆盖对方带宽；角点搭接/紧贴邻笔也算，交 classify 兜底）
+ *        → 合并交 classify（预期 '+'）
  *   Phase B 单笔定型（按编号序 2 → 3 → 7，按 x 序扫描）：
- *     2. bbox 两维均 < 0.35×lineHeight → '.'（conf=1，alts=[]，不打分类器）
+ *     2. bbox 两维均 < 0.35×lineHeight → '.'（conf=1，alts=['.']，不打分类器）
  *     3. 单笔横条（宽 > 3×高）→ 'fracbar'（alts=['fracbar','-']，不打分类器；
  *        最终 minus/分数线由 Task 5 依上下文裁决）
  *     7. 其余单笔交 classify 取 top-3 为 alts（label=top1）
@@ -22,6 +23,12 @@
 import { bboxOf, normalizeGlyph } from './strokes';
 import type { BBox, Glyph, Stroke, SymbolLabel } from './types';
 
+/**
+ * 分类器契约：输入为 normalizeGlyph 产出的 28×28 归一化图（784，行主序，背景 0 笔迹 1），
+ * 返回按置信度降序排列的候选列表。
+ * 契约钉死：必须返回 ≥1 项（top-1 为当前生效标签，top-3 作为 glyph.alts）；
+ * 返回空数组视为实现错误，segmentGlyphs 会抛出而非静默降级。
+ */
 export type ClassifyFn = (img: Float32Array) => { label: SymbolLabel; prob: number }[];
 
 /** 点判定：bbox 两维均小于 0.35×lineHeight。 */
@@ -33,10 +40,10 @@ const EQ_GAP_MAX = 0.6;
 const EQ_GAP_MIN = -0.15;
 /** ÷ 上下两点到横杠的垂直间隙上限（×lineHeight）。 */
 const DIV_DOT_GAP = 0.75;
-/** 对角线判定：高 < 3×宽（排除竖条；横条与点另行显式排除以维持规则优先级）。 */
+/** 对角线判定：身高宽比 < 3（高 < 3×宽，排除竖条；横条与点另行显式排除以维持规则优先级）。 */
 const DIAG_ASPECT = 3;
-/** 对角交叉“中心互偏”阈值（×两笔最大边长），下限 1px。 */
-const DIAG_OFFSET = 0.05;
+/** 平行判定：两笔主方向夹角 < 20° 视为平行，平行斜线不合并（如斜写的 '11'）。 */
+const PARALLEL_COS = Math.cos((20 / 180) * Math.PI);
 /** 区间重叠判定容差。 */
 const EPS = 1e-6;
 
@@ -106,19 +113,41 @@ function divGroup(bar: Prepared, dots: Prepared[], lineHeight: number): Prepared
   return [bar, top, bottom];
 }
 
-/** 规则 5：两笔对角交叉——各自非点/非横条、h<3×w、bbox 严格相交、中心互偏。 */
+/**
+ * 规则 5：两笔对角交叉——各自非点/非横条、身高宽比 < 3、bbox 严格相交、互不平行。
+ * 不要求 bbox 中心互偏：手写正则 × 的两笔常共享/近共享 bbox（中心差 ≤1px），
+ * 中心条件会漏合并且不可纠正；平行性由方向向量夹角把关。
+ */
 function diagPair(a: Prepared, b: Prepared, lineHeight: number): boolean {
   const eligible = (p: Prepared) =>
     !isDot(p, lineHeight) && !isHBar(p) && p.w > 0 && p.h < DIAG_ASPECT * p.w;
   if (!eligible(a) || !eligible(b)) return false;
   if (overlap1(a.bb.x0, a.bb.x1, b.bb.x0, b.bb.x1) <= EPS) return false;
   if (overlap1(a.bb.y0, a.bb.y1, b.bb.y0, b.bb.y1) <= EPS) return false;
-  const offset = Math.max(Math.abs(a.cx - b.cx), Math.abs(a.cy - b.cy));
-  const maxDim = Math.max(a.w, a.h, b.w, b.h);
-  return offset > Math.max(1, DIAG_OFFSET * maxDim);
+  return !diagParallel(a, b);
 }
 
-/** 规则 6：横竖交叉——横条与竖条互相贯穿对方带宽（真交叉，非角点搭接）。 */
+/**
+ * 两笔主方向（首→尾向量）夹角是否 < 20°（平行）。
+ * 用 |cos| 对称处理：同一斜线的两种运笔方向（反向量）仍算平行。
+ * 首尾重合的闭合回路方向未定义，视为不平行，交 classify 兜底。
+ */
+function diagParallel(a: Prepared, b: Prepared): boolean {
+  const ax = a.s.pts[a.s.pts.length - 1].x - a.s.pts[0].x;
+  const ay = a.s.pts[a.s.pts.length - 1].y - a.s.pts[0].y;
+  const bx = b.s.pts[b.s.pts.length - 1].x - b.s.pts[0].x;
+  const by = b.s.pts[b.s.pts.length - 1].y - b.s.pts[0].y;
+  const la2 = ax * ax + ay * ay;
+  const lb2 = bx * bx + by * by;
+  if (la2 < 1e-12 || lb2 < 1e-12) return false;
+  const cos = Math.abs((ax * bx + ay * by) / Math.sqrt(la2 * lb2));
+  return cos > PARALLEL_COS;
+}
+
+/**
+ * 规则 6：横竖交叉——横条与竖条互相覆盖对方带宽。±EPS 容差下角点搭接/紧贴
+ * 邻笔同样命中：一并合并交 classify 兜底（对两笔画数字如 '4' 有益）。
+ */
 function hvPair(a: Prepared, b: Prepared): boolean {
   let h: Prepared;
   let v: Prepared;
@@ -183,7 +212,7 @@ export function segmentGlyphs(
       if (b === a || used.has(b)) continue;
       if (eqPair(a, b, lineHeight)) {
         take(a, b);
-        glyphs.push(geometricGlyph([a, b], '=', []));
+        glyphs.push(geometricGlyph([a, b], '=', ['=']));
         break;
       }
     }
@@ -233,7 +262,7 @@ export function segmentGlyphs(
     take(p);
     if (isDot(p, lineHeight)) {
       // 规则 2：小点（不打分类器）
-      glyphs.push(geometricGlyph([p], '.', []));
+      glyphs.push(geometricGlyph([p], '.', ['.']));
     } else if (isHBar(p)) {
       // 规则 3：单笔横条 → fracbar，minus/分数线由 Task 5 裁决（不打分类器）
       glyphs.push(geometricGlyph([p], 'fracbar', ['fracbar', '-']));

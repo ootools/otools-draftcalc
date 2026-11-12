@@ -9,6 +9,10 @@
  *   ⑤ 横杠 + 上下两点 → 合并、label '/'
  *   ⑥ 两条对角线交叉 → 合并、label '*'
  *   ⑦ 相距 8px 的两个方框 → 2 个 glyph（Review Focus 1：近邻不粘连）
+ *   ⑧ 共享 bbox 的正则 ×（第二笔画在第一笔 bbox 内）→ 合并为 1 glyph
+ *     （P1 回归：旧"中心互偏"条件对中心差 ≤1px 的常见手写 × 漏合并）
+ *   ⑨ 平行不相交的两条斜线 → 不合并（2 glyph）
+ *     （P1 回归：旧"中心互偏"条件对中心差大于阈值、实际平行的斜线误合并）
  */
 import { describe, it, expect } from 'vitest';
 import { segmentGlyphs, type ClassifyFn } from '../src/core/segment';
@@ -47,6 +51,7 @@ describe('segmentGlyphs 几何规则', () => {
 
     expect(glyphs).toHaveLength(1);
     expect(glyphs[0].label).toBe('=');
+    expect(glyphs[0].alts).toEqual(['=']); // alts 至少含自身 label（types.ts 约定）
     expect(glyphs[0].conf).toBe(1);
     expect(glyphs[0].strokes).toHaveLength(2);
     expect(calls).toHaveLength(0);
@@ -59,6 +64,7 @@ describe('segmentGlyphs 几何规则', () => {
 
     expect(glyphs).toHaveLength(1);
     expect(glyphs[0].label).toBe('.');
+    expect(glyphs[0].alts).toEqual(['.']); // alts 至少含自身 label（types.ts 约定）
     expect(glyphs[0].conf).toBe(1);
     expect(glyphs[0].strokes).toHaveLength(1);
     expect(calls).toHaveLength(0);
@@ -79,7 +85,7 @@ describe('segmentGlyphs 几何规则', () => {
     expect(bars[0].alts).toContain('-');
     expect(bars[0].conf).toBe(1);
     expect(bars[0].strokes).toHaveLength(1);
-    // 只有上下两笔进分类器；分数线走几何规则（规则 8）
+    // 只有上下两笔进分类器；分数线走几何规则 3，不打分类器
     expect(calls).toHaveLength(2);
     assertBboxConsistent(glyphs);
   });
@@ -149,6 +155,44 @@ describe('segmentGlyphs 几何规则', () => {
     expect(glyphs[0].strokes).toHaveLength(1);
     expect(glyphs[1].strokes).toHaveLength(1);
     expect(glyphs[0].bbox.x1).toBeLessThan(glyphs[1].bbox.x0); // 左右序输出
+    expect(calls).toHaveLength(2);
+    assertBboxConsistent(glyphs);
+  });
+
+  it('⑧ 共享 bbox 的正则 ×（第二笔画在第一笔 bbox 内）→ 合并为 1 glyph', () => {
+    const { fn, calls } = fakeClassify([
+      [{ label: '*', prob: 0.9 }, { label: '(', prob: 0.06 }, { label: ')', prob: 0.04 }],
+    ]);
+    // 第二笔端点完全落在第一笔 bbox 内，两笔 bbox 中心重合（手写 × 极常见）
+    const glyphs = segmentGlyphs(
+      [polyline([[0, 26], [26, 0]]), polyline([[4, 4], [22, 22]])],
+      fn,
+      LH,
+    );
+
+    expect(glyphs).toHaveLength(1);
+    expect(glyphs[0].label).toBe('*');
+    expect(glyphs[0].strokes).toHaveLength(2);
+    expect(calls).toHaveLength(1);
+    assertBboxConsistent(glyphs);
+  });
+
+  it('⑨ 平行不相交的两条斜线 → 不合并（2 glyph）', () => {
+    const { fn, calls } = fakeClassify([
+      [{ label: '1', prob: 0.85 }, { label: '7', prob: 0.1 }, { label: '/', prob: 0.05 }],
+      [{ label: '1', prob: 0.85 }, { label: '7', prob: 0.1 }, { label: '/', prob: 0.05 }],
+    ]);
+    // 两笔 bbox 重叠但方向平行（夹角 0° < 20°）：不得按 bbox 相交误合并
+    const glyphs = segmentGlyphs(
+      [polyline([[0, 20], [10, 0]]), polyline([[8, 20], [18, 0]])],
+      fn,
+      LH,
+    );
+
+    expect(glyphs).toHaveLength(2);
+    expect(glyphs.map((g) => g.label)).toEqual(['1', '1']);
+    expect(glyphs[0].strokes).toHaveLength(1);
+    expect(glyphs[1].strokes).toHaveLength(1);
     expect(calls).toHaveLength(2);
     assertBboxConsistent(glyphs);
   });
