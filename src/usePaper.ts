@@ -166,8 +166,13 @@ export function createBrowserHistoryStorage(): HistoryStorage {
 
 // ---------------------------------------------------------------- Mock 识别器
 
-/** dev 调试：URL 参数 ?mock=1 强制 MockRecognizer。 */
+/**
+ * dev 调试：URL 参数 ?mock=1 强制 MockRecognizer。
+ * 仅 dev 构建生效（import.meta.env.DEV 在生产构建为 false）—— 生产包强制 Mock
+ * 会导致「无识别能力但 UI 正常」的静默降级，必须门控（LOW-7）。
+ */
 function forceMockRecognizer(): boolean {
+  if (!import.meta.env.DEV) return false;
   try {
     return (
       typeof window !== 'undefined' &&
@@ -255,6 +260,10 @@ export function usePaper(): PaperApi {
         setRecognizer(ort);
         engineReady.value = true;
         engineError.value = null; // 清掉 init 期间「未就绪」的暂态横幅
+        // init 窗口期写入的行因 '识别引擎未就绪' 滞留 writing（笔画保留、无结果无候选）
+        // → 引擎就绪后一次性补算（MED-2），否则 UI 谎报就绪。
+        manager?.recomputeWritingLines();
+        syncLines();
       })
       .catch(() => {
         // Review Focus 5：init 失败 → 横幅 + 保留手写（笔画照常记录渲染，识别静默失败）
@@ -286,8 +295,16 @@ export function usePaper(): PaperApi {
       ortRef !== null
         ? new LineManager(pipeline, hint, (fn) => {
             // whenSettled 感知调度：热身推理全部结束后同拍重跑；重跑可能再次预热，
-            // scheduler 会被 LineManager 再次调用形成链；finally 刷新 UI。
-            void ortRef!.whenSettled().then(fn).finally(() => syncLines());
+            // scheduler 会被 LineManager 再次调用形成链。
+            void ortRef!.whenSettled().then(fn).finally(() => {
+              // MED-3②：后台推理 fire-and-forget，LineManager 重试触顶后行停在
+              // writing 且失败详情无人消费 —— 在调度收尾轮询 ort.lastError 补发横幅
+              // （与 init 故障同一文案与判别语义：运行期持续故障也属「引擎未就绪」，
+              // 符合反目标「识别错误不静默」）。lastError 为 null 时不清除横幅：
+              // init reject 的常驻性不因某拍运行期恢复而撤销。
+              if (ortRef!.lastError !== null) engineError.value = ENGINE_DOWN_MESSAGE;
+              syncLines();
+            });
           })
         : new LineManager(pipeline, hint); // Mock：classify 全同步，默认 queueMicrotask 即可
     return manager;

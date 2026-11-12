@@ -224,6 +224,26 @@ describe('OrtRecognizer 预热与缓存（注入假 session；node 下无法创�
     third.reverse();
     expect(rec.classify(img).map((c) => c.label)).toEqual(['5', '3', '8']);
   });
+
+  it('lastError：后台推理失败置错误摘要（含前缀），成功推理后清 null（T8 运行期故障判定）', async () => {
+    const rec = new OrtRecognizer();
+    expect(rec.lastError).toBeNull(); // 初始无故障
+    injectSession(rec, async () => {
+      throw new Error('wasm 推理崩溃');
+    });
+    const img = warmImg();
+    expect(() => rec.classify(img)).toThrow(WarmupError); // 首见图触发热身
+    // 失败详情由 classifyAsync 的 awaiter 获得，lastError 置摘要（T8 轮询用）
+    await expect(rec.classifyAsync(img)).rejects.toThrow(/识别引擎未就绪/);
+    expect(rec.lastError).not.toBeNull();
+    expect(rec.lastError).toContain('识别引擎未就绪');
+    expect(rec.lastError).toContain('wasm 推理崩溃');
+
+    // 换成功 session 推理后 lastError 归 null（恢复语义：同一识别器自愈）
+    injectSession(rec, async () => ({ logits: { data: logits538() } }));
+    await rec.classifyAsync(img);
+    expect(rec.lastError).toBeNull();
+  });
 });
 
 describe('segmentClassify', () => {

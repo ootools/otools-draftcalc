@@ -48,8 +48,15 @@
  *
  * 坐标系：笔画/结果以「内容坐标」存取（随滚动移动）；canvas 固定为视口大小，
  * 绘制时按 scrollTop 平移（ctx.translate(0, -scrollTop)），滚动容器纵向无限高
- * 而背板内存恒定。橡皮模式下指针为圆形橡皮（跟随圆 + cursor:none），
+ * 而背板内存恒定；canvas 与滚动容器是兄弟层，必须监听 scroll 重绘（HIGH-1），
+ * 否则滚动时笔迹冻结在屏幕原位。橡皮模式下指针为圆形橡皮（跟随圆 + cursor:none），
  * pointerdown/move 持续调 eraseAt(pt, 20)。
+ *
+ * 已知限制（v1 取舍，非疏漏）：
+ *   - 行内超出右缘的笔迹不可见且不可横向滚动（.paper-scroll 为 overflow-x: hidden）：
+ *     稿纸按单列纵向纸面设计，横向越界 v1 不做横滚/自动换行；可擦除重写兜底。
+ *   - redraw 为全量重绘（不做视口裁剪）：单会话笔画量级（数百笔 × 每笔数十点）
+ *     下全量重绘远低于单帧预算；若实测卡顿再引入脏区/视口裁剪（性能观察点）。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { LineState } from '../core/lines';
@@ -158,6 +165,11 @@ function resizeCanvas(): void {
   const cv = canvasEl.value;
   const se = scrollEl.value;
   if (cv === null || se === null) return;
+  // LOW-4：显式设 CSS 宽高（不依赖样式表 100%）—— Windows 经典滚动条占位时
+  // clientWidth/Height 与 100% 布局尺寸不一致会导致 canvas 水平拉伸、坐标错位；
+  // backing store 必须与 CSS 尺寸同为视口 client 尺寸。
+  cv.style.width = `${se.clientWidth}px`;
+  cv.style.height = `${se.clientHeight}px`;
   dpr = window.devicePixelRatio || 1;
   cv.width = Math.max(1, Math.round(se.clientWidth * dpr));
   cv.height = Math.max(1, Math.round(se.clientHeight * dpr));
@@ -215,12 +227,25 @@ watch(
   () => redraw(),
 );
 
+/** 滚动重绘（HIGH-1）：笔迹按 scrollTop 平移，滚动后必须重画；具名函数以便解绑。 */
+function onScrollRedraw(): void {
+  redraw();
+}
+
 onMounted(() => {
   ro = new ResizeObserver(() => resizeCanvas());
-  if (scrollEl.value !== null) ro.observe(scrollEl.value);
+  if (scrollEl.value !== null) {
+    ro.observe(scrollEl.value);
+    // HIGH-1：canvas 兄弟层按 scrollTop 平移绘制 —— 必须监听滚动重绘，
+    // 否则滚动时笔迹冻结在屏幕原位（passive：重绘只读布局，不阻止默认滚动）。
+    scrollEl.value.addEventListener('scroll', onScrollRedraw, { passive: true });
+  }
   resizeCanvas();
 });
-onBeforeUnmount(() => ro?.disconnect());
+onBeforeUnmount(() => {
+  ro?.disconnect();
+  scrollEl.value?.removeEventListener('scroll', onScrollRedraw);
+});
 
 // ---- 指针事件 ----
 
@@ -317,6 +342,7 @@ function onPointerLeave(): void {
   position: absolute;
   inset: 0;
   overflow-y: auto;
+  /* 已知限制（v1 取舍）：横向越界笔迹不可见且不可横滚 —— 单列纵向纸面设计 */
   overflow-x: hidden;
   cursor: crosshair;
   touch-action: none;

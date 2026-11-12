@@ -19,6 +19,9 @@
  *   - '识别引擎未就绪：' —— 仅由故障路径抛出：init 失败 / 未 init / 无会话 /
  *     运行中推理失败（classifyAsync 的 awaiter 收到）→ 渲染「识别引擎未就绪」横幅；
  *   - '识别预热中：' —— 仅由首见图热身抛出（WarmupError，非故障，可 whenSettled 自愈）。
+ *   运行期故障留痕：classify() 触发的后台推理 fire-and-forget（awaiter 可能无人
+ *   消费），故障摘要同步记入 OrtRecognizer.lastError（成功推理清 null）—— T8 在
+ *   whenSettled 调度的 finally 里轮询它补发横幅，杜绝「持续故障但用户无感知」。
  */
 import type { InferenceSession } from 'onnxruntime-web';
 import type { ClassifyFn } from './segment';
@@ -98,6 +101,18 @@ export class OrtRecognizer implements Recognizer {
   private readonly cache = new Map<string, Candidate[]>();
   /** 去重同图的并发推理。 */
   private readonly pending = new Map<string, Promise<Candidate[]>>();
+  /** 最近一次推理故障摘要（'识别引擎未就绪：…'）；成功推理即清 null（lastError 的底层存储）。 */
+  private lastErrorReason: string | null = null;
+
+  /**
+   * 只读视图：最近一次推理故障摘要。后台推理经 classify() 触发后 fire-and-forget
+   * （T7 捕获 WarmupError 调度重跑；重试触顶后行停在 writing，失败详情无人消费）——
+   * T8 靠轮询本字段补发「识别引擎未就绪」横幅（反目标：识别错误不得静默）。
+   * 语义与 init 故障一致：非 null 即引擎持续故障；成功推理后归 null（自愈）。
+   */
+  get lastError(): string | null {
+    return this.lastErrorReason;
+  }
 
   constructor(modelUrl: string = './model/recog.onnx') {
     this.modelUrl = modelUrl;
@@ -161,9 +176,13 @@ export class OrtRecognizer implements Recognizer {
 
     const task = (async () => {
       const session = this.session;
-      if (!session) throw new Error('识别引擎未就绪：会话已释放');
+      if (!session) {
+        this.lastErrorReason = '识别引擎未就绪：会话已释放';
+        throw new Error(this.lastErrorReason);
+      }
       if (img.length !== 784) {
-        throw new Error(`识别引擎未就绪：输入图必须为 28×28=784，收到 ${img.length}`);
+        this.lastErrorReason = `识别引擎未就绪：输入图必须为 28×28=784，收到 ${img.length}`;
+        throw new Error(this.lastErrorReason);
       }
       try {
         const ort = await import('onnxruntime-web');
@@ -179,9 +198,11 @@ export class OrtRecognizer implements Recognizer {
         }
         const top = softmaxTop3(data);
         this.cache.set(key, top);
+        this.lastErrorReason = null; // 成功推理：清除故障（自愈语义）
         return [...top]; // 返回副本：缓存数组不外泄（与 classify/classifyAsync 命中路径一致）
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        this.lastErrorReason = `识别引擎未就绪：${msg}`; // fire-and-forget 失败详情在此留痕（T8 轮询）
         throw new Error(`识别引擎未就绪：${msg}`);
       } finally {
         this.pending.delete(key);

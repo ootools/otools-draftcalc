@@ -3,7 +3,7 @@
     <span class="bar-label">识别</span>
     <button
       v-for="(c, i) in chips()"
-      :key="`${c.lineId}-${c.index}-${c.text}-${i}`"
+      :key="`${c.lineId}-${c.index}-${c.label}`"
       class="chip"
       type="button"
       :title="`第 ${c.index + 1} 个符号：${c.text}（点击切换候选，纠正后即时重算）`"
@@ -39,7 +39,9 @@ const props = defineProps<{
 
 interface Chip {
   lineId: number;
+  /** glyph 在行内的下标（setAlt 的 glyphIndex；key 用它 + label，见模板注释）。 */
   index: number;
+  label: SymbolLabel;
   text: string;
 }
 
@@ -53,7 +55,7 @@ function chipText(label: SymbolLabel): string {
 function chips(): Chip[] {
   const line = props.lines.find((l) => l.id === props.activeLineId);
   if (!line) return [];
-  return line.glyphs.map((g, i) => ({ lineId: line.id, index: i, text: chipText(g.label) }));
+  return line.glyphs.map((g, i) => ({ lineId: line.id, index: i, label: g.label, text: chipText(g.label) }));
 }
 
 /** 点击 chip：现取该 glyph 的最新 alts 循环到下一个，调 setAlt 纠正。 */

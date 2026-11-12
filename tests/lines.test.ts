@@ -1207,3 +1207,35 @@ describe('P3-1：overrides 500 条 FIFO 上限与覆盖不刷新位置', () => {
     expect(m.labelOverride(imgOf(501))).toBe('3');
   });
 });
+
+// ---------------------------------------------------------------- T8 引擎就绪补算
+
+describe('recomputeWritingLines（T8：init 窗口期滞留行的就绪补算）', () => {
+  it('init 前写入的行因引擎未就绪滞留 writing → recomputeWritingLines 后补算为 done；done 行不重跑', () => {
+    const { fp, m } = makeManager();
+    // init 窗口期写入：pipeline 抛故障前缀 → 暂态滞留 writing（笔画保留、无 glyphs）
+    fp.queue(new Error('识别引擎未就绪：尚未设置识别器'));
+    m.addStroke(
+      polyline([
+        [100, 100],
+        [110, 130],
+      ]),
+    );
+    expect(m.lines).toHaveLength(1);
+    expect(m.lines[0].status).toBe('writing');
+    expect(m.lines[0].glyphs).toEqual([]);
+    expect(m.lines[0].result).toBeNull();
+
+    // 引擎就绪：同一假管线改为正常产出（含 '='）→ 补算后 done、result 落地
+    const glyphs = [gl('1', 100, 100, 110, 130), gl('=', 120, 115, 130, 116)];
+    fp.queue(outValue(glyphs, '1', '1'));
+    m.recomputeWritingLines();
+    expect(m.lines[0].status).toBe('done');
+    expect(m.lines[0].result).toEqual({ type: 'value', lhs: '1', value: '1' });
+
+    // done 行永不重跑：再次补算不消费 pipeline 调用
+    const callsAfterDone = fp.callCount;
+    m.recomputeWritingLines();
+    expect(fp.callCount).toBe(callsAfterDone);
+  });
+});

@@ -35,6 +35,9 @@
  *   - 重试上限：同一行【连续】5 次 WarmupError 后停止自动重跑（防无限循环）；
  *     行保持 writing、result 保持旧值/空。用户动作（addStroke/undo/eraseAt/
  *     setAlt）重置该行计数、成功重算也归零 —— 引擎热身完成后下次书写可自愈。
+ *   - T8 补算：init 窗口期写入的行因故障前缀滞留 writing，OrtRecognizer.init()
+ *     成功后由 usePaper 调 recomputeWritingLines() 一次性补算全部 writing 行
+ *     （done 行不重跑；复用上述 try/catch 与调度语义）。
  *
  * createPipeline：默认真实管线 = segmentGlyphs（行高取行内非退化笔画高度
  * 中位数，退化时回退默认行高）→ correctGlyphs（解析前 alts 纠错）→
@@ -222,6 +225,22 @@ export class LineManager {
     this.overrides.clear();
     this.strokeHistory.length = 0;
     this.nextLineId = 1;
+  }
+
+  /**
+   * 重算全部 writing 行（T8 引擎就绪回调）。
+   *
+   * 背景：init 窗口期（wasm + 模型加载数百 ms）写入的行，其 pipeline.run 抛
+   * '识别引擎未就绪' 被 runLine 视为暂态（保留笔画、status 停在 writing）；
+   * init 成功后这些行不会自动重算 —— UI 就绪但旧行无结果无候选。本方法供
+   * usePaper 在 init.then 里调用，一次性补算：逐行走 recomputeLine（重置该行
+   * 预热重试计数）→ runLine（复用既有 try/catch 与 WarmupError 调度语义，
+   * 引擎随后故障仍按暂态处理）。done 行永不重跑（Review Focus 4）。
+   */
+  recomputeWritingLines(): void {
+    for (const line of [...this.lines]) {
+      if (line.status === 'writing') this.recomputeLine(line);
+    }
   }
 
   /**
