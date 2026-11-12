@@ -9,8 +9,10 @@
 同时记录「严格逐类」口径（每数字类 ≥97%）结果作参考（strict_pass），
 metrics.json 双口径均留档。任一未达标 exit 1（不阻塞发布，但须如实记录）。
 
-留出集由 dataset.build_split(固定种子) 重建，与 train.py 评估完全一致。
+留出集由 dataset.build_split(seed) 重建，与 train.py 评估完全一致；
+--seed 须与 metrics.json 里训练时的 seed 一致（不一致直接报错退出）。
 """
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -30,12 +32,26 @@ THRESHOLDS = {**{d: 0.97 for d in DIGITS}, **{o: 0.90 for o in OPERATORS}, "sqrt
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="验收线评估（对入库 ONNX 在留出集上逐类 top-1）")
+    ap.add_argument("--seed", type=int, default=ds.SEED,
+                    help=f"数据切分种子（默认 {ds.SEED}，须与训练 metrics.json 一致）")
+    args = ap.parse_args()
+
     if not MODEL_PATH.exists():
         print(f"FAIL: 模型不存在 {MODEL_PATH}（先运行 train.py）")
         return 1
+
+    # 与训练产物的一致性校验：seed 不一致则切分不同，评估结果不可比
+    if METRICS_PATH.exists():
+        m = json.loads(METRICS_PATH.read_text(encoding="utf-8"))
+        if m.get("seed") != args.seed:
+            print(f"FAIL: --seed={args.seed} 与 metrics.json 记录的训练 seed={m.get('seed')} 不一致，"
+                  f"留出集切分不同、评估不可比；请用 --seed {m.get('seed')} 或重跑 train.py")
+            return 1
+
     import onnxruntime as ort
 
-    (Xtr, ytr, _), (Xho, yho, cho) = ds.build_split(seed=ds.SEED)
+    (Xtr, ytr, _), (Xho, yho, cho) = ds.build_split(seed=args.seed)
     sess = ort.InferenceSession(str(MODEL_PATH), providers=["CPUExecutionProvider"])
     inp = sess.get_inputs()[0]
     preds = []

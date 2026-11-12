@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 """训练 + 导出（Task 9 Step 5/6）。
 
-- 模型：model.RecogNet（计划钉死结构）；Adam、5 epoch、batch 128；
-  随机仿射增广（±15°、0.8–1.2 缩放、平移 ±2px）仅作用于训练切分。
+- 模型：model.RecogNet（计划钉死结构）；Adam(lr 2.5e-3, wd 1e-4, cosine 退火)、
+  5 epoch、batch 32；随机仿射增广（±15°、0.8–1.2 缩放、平移 ±2px）仅作用于
+  训练切分。（上述超参 = 最终达标实跑配置，argparse 默认值与之一致，零参数
+  复现。）
 - 数据：dataset.build_split()（按类分层 90/10，固定种子）。
 - 导出：torch.onnx.export（输入 [1,1,28,28] float32 → 输出 [1,17] logits，
   维序 = preprocess.LABELS = TS Task 4 LABELS）→ onnxruntime.quantization
-  quantize_dynamic 量化；量化失败或量化后留出集 top-1 相对 fp32 掉点
-  超过 2 个百分点则保留 fp32。
+  quantize_dynamic（仅量化 MatMul，见下文 P0 注释）；量化失败或量化后
+  留出集 top-1 相对 fp32 掉点超过 2 个百分点则保留 fp32。
 - 产物：training/out/recog.onnx（最终入库物）+ training/out/recog_fp32.onnx
   （量化前留档）+ metrics.json（真实运行产物）。
+
+复现命令（全链，仓库根目录执行）：
+  python3 -m venv training/.venv && . training/.venv/bin/activate
+  pip install -r training/requirements.txt
+  python training/parity_check.py     # max|diff| < 0.02
+  python training/synth.py            # ( ) sqrt x_cross 各 400
+  python training/train.py            # 全链训练+导出+量化（默认即复现配置）
+  python training/eval.py             # 验收门禁，exit 0/1
+  node training/smoke_wasm.mjs        # wasm 后端冒烟，防 ConvInteger 回归（P0）
 """
 import argparse
 import json
@@ -137,8 +148,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--seed", type=int, default=ds.SEED)
-    ap.add_argument("--lr", type=float, default=2e-3)
-    ap.add_argument("--batch", type=int, default=64)
+    ap.add_argument("--lr", type=float, default=2.5e-3)
+    ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--wd", type=float, default=1e-4)
     ap.add_argument("--schedule", choices=["none", "cosine"], default="cosine")
     ap.add_argument("--aug-seed", type=int, default=None,
@@ -212,7 +223,14 @@ def main() -> int:
     final_path = OUT / "recog.onnx"
     quant_ok, quant_err, acc_quant, pc_quant = False, None, None, None
     try:
-        quantize_dynamic(str(fp32_path), str(quant_path), weight_type=QuantType.QInt8)
+        # P0 回归防护：只量化 MatMul（FC 权重）。
+        # 默认 op_types 会把 Conv 转成 ConvInteger，onnxruntime-web 1.22.0 的
+        # wasm CPU 后端无此算子（"Could not find an implementation for
+        # ConvInteger(10)"），插件端 InferenceSession.create 直接抛错；而训练/
+        # 评估用的完整 CPU EP 支持 ConvInteger，离线指标全绿、极具欺骗性。
+        # 因此每次训练后必须运行 node training/smoke_wasm.mjs 冒烟。
+        quantize_dynamic(str(fp32_path), str(quant_path), weight_type=QuantType.QInt8,
+                         op_types_to_quantize=["MatMul"])
         acc_quant, preds_q, _ = evaluate_onnx(quant_path, Xho, yho)
         pc_quant = per_class(yho, preds_q)
         if acc_quant >= acc_fp32 - 0.02:
@@ -256,7 +274,7 @@ def main() -> int:
             "holdout": len(yho),
             "train_per_class": ctr,
             "holdout_per_class": cho,
-            "split": f"stratified {int(ds.TRAIN_FRAC*100)}/{int((1-ds.TRAIN_FRAC)*100)} seed={args.seed}",
+            "split": f"stratified {round(ds.TRAIN_FRAC*100)}/{round((1-ds.TRAIN_FRAC)*100)} seed={args.seed}",
             "build_seconds": round(t_data, 2),
         },
         "training": {
