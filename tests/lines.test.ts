@@ -1372,3 +1372,60 @@ describe('recomputeWritingLines（T8：init 窗口期滞留行的就绪补算）
     expect(fp.callCount).toBe(callsAfterDone);
   });
 });
+
+// ---------------------------------------------------------------- T8 终审：undo/eraseAt 返回受影响行 id
+
+describe('undo/eraseAt 返回受影响行 id（中间行重开后候选条跟随）', () => {
+  it('undo 撤中间行（y 回落可达的非末行）笔 → 返回该行 id；清空整行/无操作 → null', () => {
+    const { fp, m } = makeManager();
+    addValueRowAt({ fp, m, scheduled: [] }, 0); // L1 done
+    addValueRowAt({ fp, m, scheduled: [] }, 100); // L2 done
+    addValueRowAt({ fp, m, scheduled: [] }, 200); // L3 done（末行）
+    // 擦掉 L2 的 '=' → L2 重开 writing（非末行，c768c5e 后可达）
+    fp.queue(outWriting());
+    m.eraseAt({ x: 53, y: 130 }, 10);
+    // 补写一笔进 L2（y 回落）→ strokeHistory 末笔位于中间行
+    fp.queue(outWriting());
+    m.addStroke(hLine(44, 62, 126));
+    // undo 撤的就是 L2 这笔 → 返回 L2 id（候选条据此跟随中间行）
+    fp.queue(outWriting());
+    const affected = m.undo();
+    expect(affected).toBe(m.lines[1].id);
+    expect(m.lines[1].strokes.length).toBe(2); // 补写的横线已撤
+
+    // undo 清空整行 → 行移除，返回 null
+    const { fp: fp2, m: m2 } = makeManager();
+    fp2.queue(outWriting());
+    const solo = polyline([
+      [100, 100],
+      [110, 130],
+    ]);
+    m2.addStroke(solo);
+    expect(m2.lines).toHaveLength(1);
+    expect(m2.undo()).toBeNull();
+    expect(m2.lines).toHaveLength(0);
+
+    // 无操作（无任何笔画）→ null
+    const { m: m3 } = makeManager();
+    expect(m3.undo()).toBeNull();
+  });
+
+  it('eraseAt 命中中间行 → 返回该行 id；未命中/命中行整行擦空 → null', () => {
+    const { fp, m } = makeManager();
+    addValueRowAt({ fp, m, scheduled: [] }, 0); // L1 done
+    addValueRowAt({ fp, m, scheduled: [] }, 100); // L2 done
+    addValueRowAt({ fp, m, scheduled: [] }, 200); // L3 done
+    // 命中 L2（中间行）的 '=' 两横 → 返回 L2 id
+    fp.queue(outWriting());
+    expect(m.eraseAt({ x: 53, y: 130 }, 10)).toBe(m.lines[1].id);
+    expect(m.lines[1].status).toBe('writing');
+
+    // 未命中（圆远离一切笔画）→ null
+    expect(m.eraseAt({ x: 500, y: 400 }, 5)).toBeNull();
+
+    // 命中行整行擦空（L1 全部笔画被移除）→ 该行移除，返回 null
+    fp.queue(outWriting(), outWriting(), outWriting()); // L2/L3 各擦后重算一次? 无笔画变化不触发——见下行
+    expect(m.eraseAt({ x: 36, y: 30 }, 40)).toBeNull();
+    expect(m.lines).toHaveLength(2); // L1 已移除
+  });
+});

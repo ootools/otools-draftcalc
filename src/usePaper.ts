@@ -336,21 +336,25 @@ export function usePaper(): PaperApi {
     const bb = bboxOf([s]);
     const mgr = ensureManager(bb.y1 - bb.y0);
     mgr.addStroke(s);
-    touchActiveLine();
+    activeLineId.value = touchActiveLine();
     syncLines();
   }
 
   function undo(): void {
     if (manager === null) return;
-    manager.undo();
-    touchActiveLine();
+    // 终审【2】：y 回落下 undo 可重开非末行 → 用返回的受影响行 id 更新候选条；
+    // 行被清空移除/无操作（null）时回落到「末行」语义。
+    const affected = manager.undo();
+    activeLineId.value = affected !== null ? affected : touchActiveLine();
     syncLines();
   }
 
   function eraseAt(pt: { x: number; y: number }, r: number): void {
     if (manager === null) return;
-    manager.eraseAt(pt, r);
-    touchActiveLine();
+    // 终审【2】：橡皮可命中任意行 → 命中的存活行（行序最后一个）作为当前行；
+    // null（未命中/全部擦空移除）时回落到「末行」语义。
+    const affected = manager.eraseAt(pt, r);
+    activeLineId.value = affected !== null ? affected : touchActiveLine();
     syncLines();
   }
 
@@ -373,11 +377,15 @@ export function usePaper(): PaperApi {
     syncLines();
   }
 
-  /** 最后操作的行 = 当前最后一行（add/undo/erase 都作用在尾部行）。 */
-  function touchActiveLine(): void {
+  /**
+   * 回落取行：当前最后一行的 id（受影响行已移除/无操作时用）；无行返回 null。
+   * 注：undo/eraseAt 优先用 LineManager 返回的受影响行 id（终审【2】），
+   * y 回落下受影响行可能是任意行，不再恒为末行。
+   */
+  function touchActiveLine(): number | null {
     const arr = manager?.lines ?? [];
     const last = arr[arr.length - 1];
-    activeLineId.value = last !== undefined ? last.id : null;
+    return last !== undefined ? last.id : null;
   }
 
   // ---- 历史 ----

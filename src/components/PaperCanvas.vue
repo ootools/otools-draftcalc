@@ -131,12 +131,26 @@ const resultMarks = computed<ResultMark[]>(() => {
   for (const line of props.lines) {
     if (line.status !== 'done' || line.result === null) continue;
     const r = line.result;
-    if (r.type === 'error') continue;
     const eq = firstEqGlyph(line.glyphs);
     if (eq === null) continue;
     const eqH = Math.max(14, eq.bbox.y1 - eq.bbox.y0);
     const fontSize = Math.max(18, Math.round(eqH * 1.1));
     const yMid = (eq.bbox.y0 + eq.bbox.y1) / 2;
+    if (r.type === 'error') {
+      // 终审【1】：error 行不再静默 —— '=' 右侧以淡灰渲染错误消息（字号略小于
+      // value 结果）。error 行仍不入历史、不打 ✓/✗（usePaper.recordResults 契约
+      // 维持不变），仅补齐 UI 反馈避免「写了等号却毫无反应」。
+      marks.push({
+        key: `e-${line.id}`,
+        x: eq.bbox.x1 + 10,
+        y: yMid,
+        mark: r.message,
+        cls: 'err',
+        gray: null,
+        fontSize: Math.max(15, Math.round(eqH * 0.8)),
+      });
+      continue;
+    }
     if (r.type === 'value') {
       marks.push({ key: `v-${line.id}`, x: eq.bbox.x1 + 10, y: yMid, mark: r.value, cls: 'val', gray: null, fontSize });
     } else {
@@ -414,6 +428,10 @@ function onPointerLeave(): void {
   color: #dc2626;
   font-style: italic;
   font-weight: 600;
+}
+.result-mark .mark.err {
+  color: #9ca3af; /* 终审【1】：error 行淡灰提示（不入史、不打分） */
+  font-style: italic;
 }
 .result-mark .mark.ok {
   color: #16a34a;

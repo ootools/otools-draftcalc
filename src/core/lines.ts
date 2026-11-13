@@ -162,10 +162,14 @@ export class LineManager {
   /**
    * 撤销全局最后一笔（按追加序 strokeHistory；y 回落下该笔可位于任意行）。
    * 所在行若因此清空则整行移除；否则 done 行重开（writing、result 清 null）并重算。
+   *
+   * 返回受影响行的 id（T8 终审：中间行重开后候选条跟随）——该行仍存在于稿纸
+   * 时返回其 id（ui 用作 activeLineId）；行被清空移除或无操作（无任何笔画）
+   * 返回 null，调用方回落到「末行」语义。
    */
-  undo(): void {
+  undo(): number | null {
     const last = this.strokeHistory.pop();
-    if (last === undefined) return;
+    if (last === undefined) return null;
     for (let i = 0; i < this.lines.length; i++) {
       const line = this.lines[i];
       const idx = line.strokes.findIndex((st) => st.id === last.id);
@@ -173,12 +177,13 @@ export class LineManager {
       line.strokes.splice(idx, 1);
       if (line.strokes.length === 0) {
         this.lines.splice(i, 1);
-        return;
+        return null; // 行已移除，无存活受影响行
       }
       this.reopenLine(line, /* keepResult */ false);
       this.recomputeLine(line);
-      return;
+      return line.id;
     }
+    return null;
   }
 
   /**
@@ -186,8 +191,12 @@ export class LineManager {
    * 最近距离 ≤ r）相交的笔画，波及所有行；被擦空的行整行移除；其余受影响行
    * done 重开（writing、result 清 null）后各重算一次。被删笔画同步移出
    * strokeHistory（undo 只撤仍在稿纸上的笔画）。
+   *
+   * 返回受影响且仍存活的行中按行序最后一个的 id（T8 终审：中间行重开后候选条
+   * 跟随，ui 用作 activeLineId 即「最后操作的行」）；未命中任何笔画、或命中的
+   * 行全部被擦空移除时返回 null。
    */
-  eraseAt(pt: { x: number; y: number }, r: number): void {
+  eraseAt(pt: { x: number; y: number }, r: number): number | null {
     const affected: LineState[] = [];
     const removedIds = new Set<number>();
     for (const line of this.lines) {
@@ -211,11 +220,14 @@ export class LineManager {
         if (removedIds.has(this.strokeHistory[i].id)) this.strokeHistory.splice(i, 1);
       }
     }
+    let lastAffectedId: number | null = null;
     for (const line of affected) {
       if (!this.lines.includes(line)) continue; // 已擦空移除，无需重算
       this.reopenLine(line, /* keepResult */ false);
       this.recomputeLine(line);
+      lastAffectedId = line.id;
     }
+    return lastAffectedId;
   }
 
   /** 全清空（行 id 重新从 1 计数，重试状态、手工纠正与笔画历史一并丢弃）。 */

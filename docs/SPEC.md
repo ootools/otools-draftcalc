@@ -42,7 +42,7 @@ otools-draftcalc/
 │       ├── parse2d.ts                 # 分数/上标/根号作用域/括号 2D 解析
 │       ├── grammar.ts evaluate.ts     # alts 纠错 + mathjs 精确求值
 │       └── lines.ts                   # 行状态机 + createPipeline 编排
-├── tests/                    # vitest 184 项（含归一化 fixture 奇偶校验用）
+├── tests/                    # vitest 188 项（含归一化 fixture 奇偶校验用）
 ├── public/model/recog.onnx   # 入库模型（int8 动态量化，171KB）
 ├── training/                 # Python 训练管线（不随包分发，out/ 与 .venv gitignore）
 ├── scripts/                  # pack-plugin / verify-plugin / publish-market / serve-dist（games 模板）
@@ -83,7 +83,7 @@ otools-draftcalc/
 
 ```bash
 pnpm install
-pnpm test                        # vitest 184 项全绿
+pnpm test                        # vitest 188 项全绿
 pnpm build                       # vue-tsc + vite build（dist/ 含 ort/ 与 model/）
 node scripts/pack-plugin.mjs     # dist-pack/otools-draftcalc-0.1.0.oplg（5.3MB）
 node scripts/verify-plugin.mjs   # 校验全绿（wasm 产物 20.9MB 在包内）

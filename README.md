@@ -20,7 +20,7 @@ Node ≥22.18（工作区用 nvm Node 22.23），pnpm：
 ```sh
 pnpm install
 pnpm dev      # http://127.0.0.1:6547（devUrl 与 plugin.json 一致；被占用时临时 --port 换端口）
-pnpm test     # vitest 184 项
+pnpm test     # vitest 188 项
 pnpm build    # vue-tsc + vite build → dist/
 ```
 
