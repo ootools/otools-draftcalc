@@ -145,8 +145,9 @@ function main() {
     if (fs.existsSync(full)) entries.push({ name: logo, data: fs.readFileSync(full) });
   }
 
-  // 3) 前端产物 dist/（本插件没有 lib/：纯前端，无 native cdylib）
-  for (const name of ['dist', 'lib']) {
+  // 3) 前端产物与随包许可声明（本插件没有 lib/：纯前端，无 native cdylib）
+  entries.push({ name: 'THIRD_PARTY_NOTICES.md', data: fs.readFileSync(path.join(root, 'THIRD_PARTY_NOTICES.md')) });
+  for (const name of ['dist', 'lib', 'licenses']) {
     const dir = path.join(root, name);
     if (!fs.existsSync(dir)) continue;
     for (const relative of walk(dir)) {

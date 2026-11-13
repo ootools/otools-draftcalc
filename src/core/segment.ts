@@ -6,13 +6,14 @@
  * 两阶段化后编号顺序在各阶段内仍保持：
  *
  *   Phase A 多笔合并（按编号序 1 → 4 → 5 → 6，命中即消耗笔画）：
- *     1. 两横条上下叠且 x 区间重叠 → '='（conf=1，alts=['=']，不打分类器）
+ *     1. 两条长度相近、主要 x 带重叠且中间无内容的横条 → '='（conf=1，alts=['=']，不打分类器）
  *     4. 横杠 + 上下两点（点心在杠 x 区间内、分别上下邻近）→ 合并交 classify（预期 '/'）
  *     5. 两笔对角交叉（各自非点/非横条、身高宽比 <3、bbox 相交且互不平行）→ 合并交 classify（预期 '*'）
- *     6. 横竖交叉（横/竖条互相覆盖对方带宽；角点搭接/紧贴邻笔也算，交 classify 兜底）
- *        → 合并交 classify（预期 '+'）
+ *     6. 横竖交叉（横条或折笔横挑穿过竖笔带宽；整根横条的角点搭接也算）
+ *        → 合并交 classify（预期 '+' 或两笔 '4'）
+ *     其后：分离顶横 + 下部笔画只有被完整图 CNN top-1 确认为 '5' 时才接合。
  *   Phase B 单笔定型（按编号序 2 → 3 → 7，按 x 序扫描）：
- *     2. bbox 两维均 < 0.35×lineHeight → '.'（conf=1，alts=['.']，不打分类器）
+ *     2. bbox 两维均 < 0.35×lineHeight 且非细长横/竖形 → '.'（conf=1，alts=['.']，不打分类器）
  *     3. 单笔横条（宽 > 3×高）→ 'fracbar'（alts=['fracbar','-']，不打分类器；
  *        最终 minus/分数线由 Task 5 依上下文裁决）
  *     7. 其余单笔交 classify 取 top-3 为 alts（label=top1）
@@ -35,7 +36,7 @@ export type ClassifyFn = (img: Float32Array) => { label: SymbolLabel; prob: numb
 const DOT_SIZE = 0.35;
 /** 长/横/竖条判定：宽 > 3×高 为横条；高 > 3×宽 为竖条。 */
 const BAR_ASPECT = 3;
-/** '=' 两横条垂直间隙允许范围（×lineHeight）：允许轻微重叠到 0.6 倍行高间隙。 */
+/** '=' 两横条垂直间隙主尺度（×lineHeight）；另由杠长补足宽间隙，轻微重叠允许至 -0.15。 */
 const EQ_GAP_MAX = 0.6;
 const EQ_GAP_MIN = -0.15;
 /** ÷ 上下两点到横杠的垂直间隙上限（×lineHeight）。 */
@@ -69,7 +70,8 @@ function prepare(strokes: Stroke[]): Prepared[] {
 }
 
 function isDot(p: Prepared, lineHeight: number): boolean {
-  return p.w < DOT_SIZE * lineHeight && p.h < DOT_SIZE * lineHeight;
+  return p.w < DOT_SIZE * lineHeight && p.h < DOT_SIZE * lineHeight &&
+    !isHBar(p) && !isVBar(p); // 小且点形：细长数字/上标/短减号不是点。
 }
 
 /** 横向长条：宽 > 3×高（水平单点画线 h=0 时恒真）。 */
@@ -87,14 +89,71 @@ function overlap1(a0: number, a1: number, b0: number, b1: number): number {
   return Math.min(a1, b1) - Math.max(a0, b0);
 }
 
-/** 规则 1：两横条上下叠且 x 区间重叠。 */
-function eqPair(a: Prepared, b: Prepared, lineHeight: number): boolean {
+/**
+ * 横杠的分数归属提示：与解析器同样要求横向覆盖和上下内容邻近。
+ * 不用 label/模型候选；长竖/弯曲主体才是操作数，点和横条不能抢占该角色。
+ */
+function fractionSides(bar: Prepared, pool: Prepared[], lineHeight: number): { above: Prepared[]; below: Prepared[] } {
+  const sides = { above: [] as Prepared[], below: [] as Prepared[] };
+  if (!isHBar(bar)) return sides;
+  for (const p of pool) {
+    if (p === bar || isHBar(p) || isDot(p, lineHeight)) continue;
+    const overlap = overlap1(bar.bb.x0, bar.bb.x1, p.bb.x0, p.bb.x1);
+    if (overlap < -EPS || overlap < 0.3 * p.w) continue;
+    if (p.cy < bar.cy && bar.bb.y0 - p.bb.y1 <= 0.75 * lineHeight) sides.above.push(p);
+    if (p.cy > bar.cy && p.bb.y0 - bar.bb.y1 <= 0.75 * lineHeight) sides.below.push(p);
+  }
+  return sides;
+}
+
+function isFractionBar(bar: Prepared, pool: Prepared[], lineHeight: number): boolean {
+  const { above, below } = fractionSides(bar, pool, lineHeight);
+  return above.length > 0 && below.length > 0;
+}
+
+/** 在等号预热时，仅检测新笔是否补入既有「横杠+分子」的分母区，不推理/求值。 */
+export function continuesFraction(strokes: Stroke[], stroke: Stroke, lineHeight: number): boolean {
+  const pool = prepare(strokes);
+  const next = prepare([stroke])[0];
+  if (next === undefined) return false;
+  return pool.some((bar) => {
+    const existing = fractionSides(bar, pool, lineHeight);
+    const appended = fractionSides(bar, [bar, next], lineHeight);
+    return existing.above.length > 0 && appended.below.includes(next);
+  });
+}
+
+/** 规则 1：两条长度相近、主要 x 带重叠的横条上下叠，且两杠之间无其它内容。 */
+function eqPair(a: Prepared, b: Prepared, lineHeight: number, pool: Prepared[]): boolean {
   if (!isHBar(a) || !isHBar(b)) return false;
-  if (overlap1(a.bb.x0, a.bb.x1, b.bb.x0, b.bb.x1) <= EPS) return false;
+  if (isFractionBar(a, pool, lineHeight) || isFractionBar(b, pool, lineHeight)) return false;
+  const overlap = overlap1(a.bb.x0, a.bb.x1, b.bb.x0, b.bb.x1);
+  if (overlap < 0.5 * Math.min(a.w, b.w)) return false;
+  if (Math.min(a.w, b.w) < 0.5 * Math.max(a.w, b.w)) return false;
   const upper = a.cy <= b.cy ? a : b;
   const lower = a.cy <= b.cy ? b : a;
+  // 分母尚未写入时，下横覆盖分子而上横位于分子左侧同一 y 带，是负号+待续分数线。
+  // 只检查分子自身的横域/字身，不把旁边或仅在上方的数字泛当成等号禁区。
+  const pendingNumerator = fractionSides(lower, pool, lineHeight).above;
+  if (pendingNumerator.some((p) =>
+    upper.bb.x1 < p.bb.x0 && overlap1(upper.bb.y0, upper.bb.y1, p.bb.y0, p.bb.y1) >= -EPS,
+  )) return false;
   const gap = lower.bb.y0 - upper.bb.y1;
-  return gap <= EQ_GAP_MAX * lineHeight && gap >= EQ_GAP_MIN * lineHeight;
+  // 字号是主尺度；细长的真实等号允许按两杠自身长度补足间隙，仍共用全部重叠/夹墨约束。
+  const gapMax = Math.max(EQ_GAP_MAX * lineHeight, Math.max(a.w, b.w));
+  if (gap > gapMax || gap < EQ_GAP_MIN * lineHeight) return false;
+  const x0 = Math.max(a.bb.x0, b.bb.x0);
+  const x1 = Math.min(a.bb.x1, b.bb.x1);
+  return !pool.some((p) =>
+    p !== a && p !== b && p.cy > upper.bb.y1 && p.cy < lower.bb.y0 &&
+    overlap1(p.bb.x0, p.bb.x1, x0, x1) >= -EPS,
+  );
+}
+
+/** 只读几何结构提示：不归一化、不调用分类器，也不生成可进入求值的占位数字。 */
+export function hasGeometricEquality(strokes: Stroke[], lineHeight: number): boolean {
+  const pool = prepare(strokes);
+  return pool.some((a, i) => pool.slice(i + 1).some((b) => eqPair(a, b, lineHeight, pool)));
 }
 
 /** 规则 4：横杠 + 上下两点（点心在杠 x 区间内，分别在其上下邻近）→ [杠, 上点, 下点]。 */
@@ -145,27 +204,53 @@ function diagParallel(a: Prepared, b: Prepared): boolean {
 }
 
 /**
- * 规则 6：横竖交叉——横条与竖条互相覆盖对方带宽。±EPS 容差下角点搭接/紧贴
- * 邻笔同样命中：一并合并交 classify 兜底（对两笔画数字如 '4' 有益）。
+ * 规则 6：横竖交叉。横笔可为整根横条，也可为折笔里的横挑（手写两笔 '4'）；
+ * 折笔只在字身内部回挑的实际横向线段严格穿过竖笔带宽时合并，底部收笔/邻字 bbox 相交不算。
  */
 function hvPair(a: Prepared, b: Prepared): boolean {
   let h: Prepared;
   let v: Prepared;
-  if (isHBar(a) && isVBar(b)) {
+  if (isVBar(b) && !isVBar(a)) {
     h = a;
     v = b;
-  } else if (isHBar(b) && isVBar(a)) {
+  } else if (isVBar(a) && !isVBar(b)) {
     h = b;
     v = a;
   } else {
     return false;
   }
-  return (
-    v.bb.y0 <= h.bb.y0 + EPS &&
-    v.bb.y1 >= h.bb.y1 - EPS && // 竖笔贯穿横杠 y 带
-    h.bb.x0 <= v.bb.x0 + EPS &&
-    h.bb.x1 >= v.bb.x1 - EPS // 横笔贯穿竖笔 x 带
-  );
+  const crosses = (bb: BBox, strict: boolean) =>
+    v.bb.y0 <= bb.y0 + EPS && v.bb.y1 >= bb.y1 - EPS &&
+    (strict
+      ? bb.x0 < v.bb.x0 - EPS && bb.x1 > v.bb.x1 + EPS
+      : bb.x0 <= v.bb.x0 + EPS && bb.x1 >= v.bb.x1 - EPS);
+  if (isHBar(h)) return crosses(h.bb, false);
+  for (let i = 1; i < h.s.pts.length; i++) {
+    const start = h.s.pts[i - 1];
+    const end = h.s.pts[i];
+    const bb = {
+      x0: Math.min(start.x, end.x), x1: Math.max(start.x, end.x),
+      y0: Math.min(start.y, end.y), y1: Math.max(start.y, end.y),
+    };
+    // 折笔横挑必须位于字身内部（先下探再回挑），不能把 '2' 的底部收笔当成跨字横杠。
+    if (bb.y1 < h.bb.y1 - EPS && bb.x1 - bb.x0 > BAR_ASPECT * (bb.y1 - bb.y0) && crosses(bb, true)) return true;
+  }
+  return false;
+}
+
+/**
+ * 分离顶横的两笔数字（手写 '5'）：下笔从顶横左端附近向下起笔。
+ * 几何只提出候选；分数线不可接合，完整两笔的 CNN top-1 还必须确认 '5'。
+ */
+function detachedCapPair(bar: Prepared, body: Prepared, lineHeight: number): boolean {
+  if (!isHBar(bar) || isHBar(body) || isDot(body, lineHeight) || body.s.pts.length < 2) return false;
+  const start = body.s.pts[0];
+  const next = body.s.pts[1];
+  if (start.y !== body.bb.y0 || next.y <= start.y || next.y - start.y <= BAR_ASPECT * Math.abs(next.x - start.x)) return false;
+  const gap = body.bb.y0 - bar.bb.y1;
+  if (gap < -EPS || gap > DOT_SIZE * lineHeight) return false;
+  if (bar.cx <= start.x || overlap1(bar.bb.x0, bar.bb.x1, body.bb.x0, body.bb.x1) <= EPS) return false;
+  return Math.hypot(bar.bb.x0 - start.x, bar.cy - start.y) < DOT_SIZE * lineHeight;
 }
 
 /** 几何定型 glyph：conf=1，bbox 由 strokes 现算。 */
@@ -210,7 +295,7 @@ export function segmentGlyphs(
     if (used.has(a)) continue;
     for (const b of pool) {
       if (b === a || used.has(b)) continue;
-      if (eqPair(a, b, lineHeight)) {
+      if (eqPair(a, b, lineHeight, pool)) {
         take(a, b);
         glyphs.push(geometricGlyph([a, b], '=', ['=']));
         break;
@@ -252,6 +337,19 @@ export function segmentGlyphs(
         glyphs.push(classifyGroup([a, b], classify));
         break;
       }
+    }
+  }
+
+  // 分离的顶横只在完整图被模型确认为两笔 '5' 时接合；不能吞掉旁边的减号/分数线。
+  for (const bar of pool) {
+    if (used.has(bar) || isFractionBar(bar, pool, lineHeight)) continue;
+    for (const body of pool) {
+      if (body === bar || used.has(body) || !detachedCapPair(bar, body, lineHeight)) continue;
+      const candidate = classifyGroup([bar, body], classify);
+      if (candidate.label !== '5') continue;
+      take(bar, body);
+      glyphs.push(candidate);
+      break;
     }
   }
 

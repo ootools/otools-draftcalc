@@ -230,6 +230,24 @@ export interface PaperApi {
   copyLastResult(): Promise<boolean>;
 }
 
+/** pipeline 包装：故障错误按前缀驱动横幅（WarmupError 不匹配前缀，绝不进横幅），原样上抛。 */
+export function wrapPipeline(inner: LinePipeline, engineError: Ref<string | null>): LinePipeline {
+  return {
+    ...(inner.hasGeometricEquality === undefined ? {} : {
+      hasGeometricEquality: (strokes: Stroke[]) => inner.hasGeometricEquality!(strokes),
+    }),
+    run(strokes: Stroke[]) {
+      try {
+        return inner.run(strokes);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.startsWith(ENGINE_DOWN_PREFIX)) engineError.value = ENGINE_DOWN_MESSAGE;
+        throw e; // LineManager 依自身契约处理（Warmup → 调度重跑；故障 → 暂态）
+      }
+    },
+  };
+}
+
 export function usePaper(): PaperApi {
   const lines = shallowRef<LineState[]>([]);
   const engineReady = ref(false);
@@ -290,6 +308,7 @@ export function usePaper(): PaperApi {
     const hint = clampLineHeightHint(firstStrokeHeightHint);
     const pipeline = wrapPipeline(
       createPipeline(segmentClassify(), hint, (img) => manager?.labelOverride(img) ?? null),
+      engineError,
     );
     manager =
       ortRef !== null
@@ -308,21 +327,6 @@ export function usePaper(): PaperApi {
           })
         : new LineManager(pipeline, hint); // Mock：classify 全同步，默认 queueMicrotask 即可
     return manager;
-  }
-
-  /** pipeline 包装：故障错误按前缀驱动横幅（WarmupError 不匹配前缀，绝不进横幅），原样上抛。 */
-  function wrapPipeline(inner: LinePipeline): LinePipeline {
-    return {
-      run(strokes: Stroke[]) {
-        try {
-          return inner.run(strokes);
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          if (msg.startsWith(ENGINE_DOWN_PREFIX)) engineError.value = ENGINE_DOWN_MESSAGE;
-          throw e; // LineManager 依自身契约处理（Warmup → 调度重跑；故障 → 暂态）
-        }
-      },
-    };
   }
 
   function clampLineHeightHint(h: number): number {

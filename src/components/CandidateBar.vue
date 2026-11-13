@@ -1,16 +1,30 @@
 <template>
   <div v-if="chips().length > 0" class="candidate-bar">
     <span class="bar-label">识别</span>
-    <button
-      v-for="(c, i) in chips()"
-      :key="`${c.lineId}-${c.index}-${c.label}`"
-      class="chip"
-      type="button"
-      :title="`第 ${c.index + 1} 个符号：${c.text}（点击切换候选，纠正后即时重算）`"
-      @click="onChip(c)"
+    <div
+      v-for="c in chips()"
+      :key="`${c.lineId}-${c.index}`"
+      class="chip-controls"
     >
-      {{ c.text }}
-    </button>
+      <button
+        class="chip"
+        type="button"
+        :title="`第 ${c.index + 1} 个符号：${c.text}（点击切换候选，纠正后即时重算）`"
+        @click="onChip(c)"
+      >
+        {{ c.text }}
+      </button>
+      <select
+        class="correction-select"
+        :aria-label="`更正第 ${c.index + 1} 个符号`"
+        :title="`更正第 ${c.index + 1} 个符号（全部符号）`"
+        value=""
+        @change="onCorrection(c, $event)"
+      >
+        <option value="" disabled>更正</option>
+        <option v-for="label in c.choices" :key="label" :value="label">{{ chipText(label) }}</option>
+      </select>
+    </div>
   </div>
 </template>
 
@@ -19,7 +33,8 @@
  * Task 8：候选纠正条 —— 当前（最后操作的）行 glyphs 渲染为文本 chip 序列。
  * label 直显（'fracbar' → '—'、'sqrt' → '√'）；点击 chip 循环该 glyph 的 alts
  * （含当前 label），调 setAlt(lineId, glyphIndex, newLabel)。行 done 后 chip 仍可点
- * （LineManager.setAlt 纠正后即时重算）。
+ * （LineManager.setAlt 纠正后即时重算）。“更正”下拉保留 alts 优先顺序并补齐全部
+ * 符号，正确标签不在 top-3 时也能调用同一 setAlt 恢复。
  *
  * 响应式注意：LineManager 原地变更 LineState（同一对象引用），若把行对象作为 prop
  * 传入，props 浅相等会让子组件跳过重渲染（chip 永远停在旧状态）。因此本组件接收
@@ -27,7 +42,10 @@
  * 普通函数 —— render effect 直接追踪 props.lines 的身份变化，每次 sync 必然重渲染。
  */
 import type { LineState } from '../core/lines';
-import type { SymbolLabel } from '../core/types';
+import { LABELS } from '../core/recognize';
+import type { Glyph, SymbolLabel } from '../core/types';
+
+const CORRECTION_LABELS: readonly SymbolLabel[] = [...LABELS, '.', '=', 'fracbar'];
 
 const props = defineProps<{
   /** 各行状态（每次 sync 为新数组引用）。 */
@@ -39,10 +57,11 @@ const props = defineProps<{
 
 interface Chip {
   lineId: number;
-  /** glyph 在行内的下标（setAlt 的 glyphIndex；key 用它 + label，见模板注释）。 */
+  /** glyph 在行内的下标（setAlt 的 glyphIndex）。 */
   index: number;
   label: SymbolLabel;
   text: string;
+  choices: SymbolLabel[];
 }
 
 function chipText(label: SymbolLabel): string {
@@ -51,11 +70,22 @@ function chipText(label: SymbolLabel): string {
   return label;
 }
 
+/** 候选优先、当前标签兜底、白名单补全；不变更 glyph.alts 的快切顺序。 */
+function correctionChoices(glyph: Glyph): SymbolLabel[] {
+  return [...new Set([...glyph.alts, glyph.label, ...CORRECTION_LABELS])];
+}
+
 /** 渲染期推导（非 computed：computed 对同一行对象引用不会触发下游）。 */
 function chips(): Chip[] {
   const line = props.lines.find((l) => l.id === props.activeLineId);
   if (!line) return [];
-  return line.glyphs.map((g, i) => ({ lineId: line.id, index: i, label: g.label, text: chipText(g.label) }));
+  return line.glyphs.map((g, i) => ({
+    lineId: line.id,
+    index: i,
+    label: g.label,
+    text: chipText(g.label),
+    choices: correctionChoices(g),
+  }));
 }
 
 /** 点击 chip：现取该 glyph 的最新 alts 循环到下一个，调 setAlt 纠正。 */
@@ -67,6 +97,16 @@ function onChip(c: Chip): void {
   const idx = alts.indexOf(g.label);
   const next = alts[(idx + 1) % alts.length];
   if (next !== g.label) props.setAlt(c.lineId, c.index, next);
+}
+
+/** 全标签更正仍走原 setAlt；选择后恢复提示，重复选择也可触发 change。 */
+function onCorrection(c: Chip, event: Event): void {
+  const select = event.target as HTMLSelectElement;
+  const label = select.value as SymbolLabel;
+  select.value = '';
+  if (!CORRECTION_LABELS.includes(label)) return;
+  const glyph = props.lines.find((line) => line.id === c.lineId)?.glyphs[c.index];
+  if (glyph && label !== glyph.label) props.setAlt(c.lineId, c.index, label);
 }
 </script>
 
@@ -92,6 +132,22 @@ function onChip(c: Chip): void {
   font-size: 12px;
   color: #6b7280;
   margin-right: 2px;
+}
+.chip-controls {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.correction-select {
+  width: 58px;
+  padding: 4px 2px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #6b7280;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
 }
 .chip {
   min-width: 36px;

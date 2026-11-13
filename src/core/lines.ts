@@ -4,7 +4,8 @@
  * LineManager 只管行的生命周期与几何判定（分行 / rhs 续写 / 撤销 / 橡皮 /
  * 候选纠正），识别与求值全部经注入的 LinePipeline（依赖注入，测试用假实现）：
  *
- *   addStroke   → 笔画进当前 writing 行，随后【仅对该行】跑 pipeline；末行
+ *   addStroke   → 笔画进当前 writing 行（预热且已有几何等号时，明显下方新主行
+ *                 例外），随后【仅对该行】跑 pipeline；末行
  *                 done 时先判 rhs 续写（优先），再按 y 几何回落——新笔 y 中心
  *                 落在某个仍为 writing 的行（bbox ±容差）内则路由回该行
  *                 （P2：eraseAt 重开的非末行保持可达），否则开新行。
@@ -39,9 +40,11 @@
  *     成功后由 usePaper 调 recomputeWritingLines() 一次性补算全部 writing 行
  *     （done 行不重跑；复用上述 try/catch 与调度语义）。
  *
- * createPipeline：默认真实管线 = segmentGlyphs（行高取行内非退化笔画高度
- * 中位数，退化时回退默认行高）→ correctGlyphs（解析前 alts 纠错）→
- * parseEquation → evalEquation；eq 仅在行内含 '=' 时非 null。
+ * createPipeline：默认真实管线 = segmentGlyphs（行高取非横向主体笔画的主高
+ * 中位数，排除包住较小主体的弯括号；无主体时回退默认行高）→ 用户 labelOverride → 语法校验 →
+ * parseEquation → evalEquation；eq 仅在行内含 '=' 时非 null。所有 glyph 始终
+ * 保留供候选纠正；校验若需要删除输入则报错，绝不计算缩短后的算式。
+ * 完整几何等号在预热期仅作为行结构提示：允许明显下方的新主行独立等待重跑。
  *
  * 纠正持久化（setAlt 跨重跑不被 CNN top-1 覆盖）：LineManager 内部维护
  * overrides Map（key = glyph 归一化图内容，上限 500 条 FIFO 淘汰防无限增长），
@@ -57,7 +60,7 @@ import { evalEquation, type EvalResult } from './evaluate';
 import { correctGlyphs } from './grammar';
 import { parseEquation } from './parse2d';
 import { WarmupError, segmentClassify } from './recognize';
-import { segmentGlyphs, type ClassifyFn } from './segment';
+import { continuesFraction, hasGeometricEquality, segmentGlyphs, type ClassifyFn } from './segment';
 import { bboxOf, normalizeGlyph } from './strokes';
 import type { BBox, Equation, Glyph, Stroke, SymbolLabel } from './types';
 
@@ -79,6 +82,8 @@ export interface LineState {
  */
 export interface LinePipeline {
   run(strokes: Stroke[]): { glyphs: Glyph[]; eq: Equation | null; result: EvalResult | null };
+  /** 预热时的只读结构提示；不得调用真实分类器/求值，未提供则保留原状态机行为。 */
+  hasGeometricEquality?(strokes: Stroke[]): boolean;
 }
 
 // ---------------------------------------------------------------- 常量
@@ -106,6 +111,8 @@ export class LineManager {
   private readonly scheduleRerun: (fn: () => void) => void;
   /** 行 id → 连续 WarmupError 次数（用户动作/成功重算归零）。 */
   private readonly warmupFailures = new Map<number, number>();
+  /** 当前等待识别预热且结构上已有完整等号的行；只用于快速另起主行，不生成结果。 */
+  private readonly warmingWithEquality = new Set<number>();
   /** 手工纠正持久表：glyph 归一化图内容 key → 用户选定 label（FIFO 上限见 MAX_OVERRIDES）。 */
   private readonly overrides = new Map<string, SymbolLabel>();
   /** 全局笔画追加序（undo 依据；y 回落下最后一笔可位于任意行）。 */
@@ -123,14 +130,15 @@ export class LineManager {
   }
 
   /**
-   * 追加一笔：当前 writing 行存在则入该行；末行 done 时先判 rhs 续写（优先），
+   * 追加一笔：当前 writing 行存在则入该行（预热且已有几何等号时，明显下方的
+   * 新主行例外）；末行 done 时先判 rhs 续写（优先），
    * 不满足则按 y 几何回落到仍为 writing 的行（P2：eraseAt 重开的非末行可达），
    * 仍无归属才开新行。随后仅对受影响的一行跑 pipeline。
    */
   addStroke(s: Stroke): void {
     this.strokeHistory.push(s);
     const last = this.lines[this.lines.length - 1] ?? null;
-    if (last !== null && last.status === 'writing') {
+    if (last !== null && last.status === 'writing' && !this.isNewRowBelowWarmingEquality(last, s)) {
       last.strokes.push(s);
       this.recomputeLine(last);
       return;
@@ -234,6 +242,7 @@ export class LineManager {
   clear(): void {
     this.lines.splice(0, this.lines.length);
     this.warmupFailures.clear();
+    this.warmingWithEquality.clear();
     this.overrides.clear();
     this.strokeHistory.length = 0;
     this.nextLineId = 1;
@@ -300,6 +309,19 @@ export class LineManager {
   // ------------------------------------------------------------ 内部：几何判定
 
   /**
+   * 只有正在预热且已有几何等号的行才允许另起下方主行：新区间离行底至少半个
+   * 主字号；同高度 RHS、既有分数线的分母补笔与上方指数不满足。不能以普通 y 不相交拆数学区域。
+   */
+  private isNewRowBelowWarmingEquality(line: LineState, s: Stroke): boolean {
+    if (!this.warmingWithEquality.has(line.id)) return false;
+    const bb = bboxOf([s]);
+    const lineBb = bboxOf(line.strokes);
+    const height = lineHeightOf(line.strokes, this.lineHeightHint);
+    if (continuesFraction(line.strokes, s, height)) return false;
+    return bb.y0 > lineBb.y1 + Math.max(LINE_Y_TOL, 0.5 * height);
+  }
+
+  /**
    * rhs 续写判定（规则 3/5，对 value/compare/error 型 done 行统一适用）：
    * 行 glyphs 存在 '=' glyph、新笔 x 中心 > '=' bbox.x1、y 中心在行 bbox
    * y ±LINE_Y_TOL 内。'=' 取 bbox.x0 最小者（与 parseEquation 取第一个 '=' 一致）。
@@ -354,6 +376,7 @@ export class LineManager {
    * 行仍存在且 writing）；达上限停止。其它错误：视为暂态，保留现状不调度。
    */
   private runLine(line: LineState): void {
+    this.warmingWithEquality.delete(line.id);
     try {
       const out = this.pipeline.run(line.strokes.slice());
       line.glyphs = out.glyphs;
@@ -368,6 +391,7 @@ export class LineManager {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!msg.startsWith(WARMUP_PREFIX)) return; // 故障：暂态，保留笔画与现状
+      if (this.pipeline.hasGeometricEquality?.(line.strokes) === true) this.warmingWithEquality.add(line.id);
       const failures = (this.warmupFailures.get(line.id) ?? 0) + 1;
       this.warmupFailures.set(line.id, failures);
       if (failures >= MAX_CONSECUTIVE_WARMUP) return; // 连续 5 次 → 停止自动重跑
@@ -383,10 +407,10 @@ export class LineManager {
 // ---------------------------------------------------------------- 真实管线
 
 /**
- * 默认 LinePipeline：segmentGlyphs → labelOverride 应用 → correctGlyphs →
- * parseEquation → evalEquation。
- * 行高 = 行内非退化笔画（高度 > 0）的 bbox 高度中位数（偶数取上中位），全退化
- * （如整行只有横条）时回退 fallbackLineHeight；eq 仅在纠错后仍含 '=' 时非 null。
+ * 默认 LinePipeline：segmentGlyphs → labelOverride 应用 → correctGlyphs 校验 →
+ * parseEquation → evalEquation（校验会删符号则报错，不用删后的序列求值）。
+ * 行高 = 非横向主体笔画中高度 ≥ 0.6×最高主体的高度中位数（偶数取上中位），
+ * 弯括号包住较小字号时不参与最高锚点；无主体时回退 fallbackLineHeight。
  * labelOverride（可选）：对 segment 产出的每个 glyph 先按 normalizeGlyph 算图
  * 查纠正，命中则改写 label（原 top-1 插入 alts 首位、alts 含当前 label、
  * conf 置 1）后再做语法纠错 —— 纠正优先于语法启发式。
@@ -397,6 +421,9 @@ export function createPipeline(
   labelOverride?: (img: Float32Array) => SymbolLabel | null,
 ): LinePipeline {
   return {
+    hasGeometricEquality(strokes: Stroke[]): boolean {
+      return hasGeometricEquality(strokes, lineHeightOf(strokes, fallbackLineHeight));
+    },
     run(strokes: Stroke[]): { glyphs: Glyph[]; eq: Equation | null; result: EvalResult | null } {
       // 批量预热（Task 10 集成修复）：segmentGlyphs 遇到首个未缓存图会经
       // classify 抛 WarmupError 中止整次分割 —— 若不加处理，每次重跑只会
@@ -428,25 +455,40 @@ export function createPipeline(
       }
       const overridden =
         labelOverride === undefined ? segmented : segmented.map((g) => applyLabelOverride(g, labelOverride));
-      const glyphs = correctGlyphs(overridden);
+      // 候选必须对应全部原笔画。语法清理若删掉任何 glyph，就只报错，不求值被缩短的算式。
+      const glyphs = overridden;
+      const checked = correctGlyphs(glyphs);
       if (!glyphs.some((g) => g.label === '=')) return { glyphs, eq: null, result: null };
       const eq = parseEquation(glyphs);
-      return { glyphs, eq, result: evalEquation(eq) };
+      const result: EvalResult = checked.length !== glyphs.length
+        ? { type: 'error', message: '算式有无法确定的符号，请选择候选纠正' }
+        : evalEquation(eq);
+      return { glyphs, eq, result };
     },
   };
 }
 
-/** 行高参考：非退化笔画高度的中位数（偶数取上中位）；无有效高度回退 fallback。 */
+/** 主字号参考：排除横条/大型括号容器，再取与最高主体同级的高度中位数。 */
 function lineHeightOf(strokes: Stroke[], fallback: number): number {
-  const heights: number[] = [];
-  for (const s of strokes) {
+  const candidates = strokes.map((s) => {
     const bb = bboxOf([s]);
-    const h = bb.y1 - bb.y0;
-    if (h > 0) heights.push(h);
-  }
+    return { s, bb, h: bb.y1 - bb.y0, w: bb.x1 - bb.x0 };
+  }).filter((p) => p.h > 0 && p.w <= 3 * p.h);
+  // 纵向弯括号的端点跨整高，中间侧向鼓出；它包住的内部字号不能被外包高度压成点。
+  const bodies = candidates.filter((p) => {
+    const first = p.s.pts[0];
+    const last = p.s.pts[p.s.pts.length - 1];
+    const enclosingCurve = p.s.pts.length > 2 && p.w > 0 &&
+      Math.abs(last.y - first.y) === p.h && Math.abs(last.x - first.x) < p.w / 3;
+    return !enclosingCurve || !candidates.some((q) =>
+      p !== q && q.h < 0.6 * p.h && q.bb.y0 >= p.bb.y0 && q.bb.y1 <= p.bb.y1,
+    );
+  });
+  const heights = (bodies.length > 0 ? bodies : candidates).map((p) => p.h);
   if (heights.length === 0) return fallback;
-  heights.sort((a, b) => a - b);
-  return heights[Math.floor(heights.length / 2)];
+  const anchor = Math.max(...heights);
+  const mains = heights.filter((h) => h >= 0.6 * anchor).sort((a, b) => a - b);
+  return mains[Math.floor(mains.length / 2)];
 }
 
 // ---------------------------------------------------------------- 小工具
