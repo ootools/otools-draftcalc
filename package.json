@@ -16,7 +16,7 @@
   "dependencies": {
     "mathjs": "^14",
     "onnxruntime-web": "1.22.0",
-    "otools-plugin-sdk": "file:vendor/otools-plugin-sdk",
+    "otools-plugin-sdk": "^0.3.0",
     "vue": "3.5.27"
   },
   "devDependencies": {

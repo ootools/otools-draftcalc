@@ -1,9 +1,0 @@
-{
-  "repository": "https://github.com/ootools/otools-plugin-sdk",
-  "commit": "506a1740d7c7a598f04c199ac152a13d14b164dd",
-  "version": "0.2.0",
-  "contents": "package.json, dist, LICENSE, README.md",
-  "reason": "Pinned SDK with direct Panel color selection, freezeScreen mode, and awaited host clipboard routing.",
-  "changesFromBase": "none",
-  "note": "sdk-direct-launch.patch 的改动（CaptureSelectOptions 的 mode/restoreHost/freezeScreen，HOST_OWNED_COMMANDS 的 otools_copy_text / hide_panel_window）已并入上游 0.2.0，补丁文件已删除。"
-}
