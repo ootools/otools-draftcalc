@@ -77,6 +77,7 @@ export interface OToolsHostBrowsePayload {
     entries: OToolsHostDirEntry[];
 }
 export interface OToolsEnv {
+    pageMode?: import('./page-mode').PageMode;
     appName?: string;
     appVersion?: string;
     nativeId?: string;
@@ -88,7 +89,53 @@ export interface OToolsEnv {
     paths?: Record<string, string>;
 }
 export interface OToolsAPI {
+    /**
+     * Capability-set version of the injected API. Hosts older than the one that
+     * introduced the field leave it undefined; read it as
+     * `window.otools?.apiVersion ?? 0` and gate newer capabilities on it.
+     */
+    apiVersion?: number;
+    /**
+     * Generic command bridge (apiVersion >= 2) with built-in routing:
+     * `plugin:*` / `otools_host_*` / plugin-state commands go straight to the host;
+     * anything else is treated as one of the plugin's own methods and tried against
+     * the plugin's native cdylib first, falling back to the host when the library
+     * answers "unknown method" or is not enabled at all.
+     */
+    invoke?<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
+    /**
+     * Host-filesystem DOM picker (apiVersion >= 2). Same semantics as the SDK's
+     * `pickFromHostTree`; the only picker that works in remote / pure-web mode,
+     * where native dialogs open on the server and the remote user cannot see them.
+     */
+    pickFromHostTree?: import('./host-tree-factory').HostTreePicker;
+    /**
+     * Subscribe to host keyword dispatch (apiVersion >= 2). Same semantics as the
+     * SDK's `onOtoolsKeyword`; resolves to an unlisten function.
+     */
+    onOtoolsKeyword?: import('./keyword-factory').KeywordListener;
+    /**
+     * Subscribe to host file delivery (apiVersion >= 2) — the OS hands the plugin a
+     * file via double-click / drag. Same semantics as the SDK's `onOtoolsOpenFile`;
+     * resolves to an unlisten function.
+     */
+    onOtoolsOpenFile?: import('./file-open-factory').FileOpenListener;
+    copyText?(text: string): void;
+    showNotification?(body: string, clickFeatureCode?: string): void;
+    deepLinks?: import('./deep-links').DeepLinksApi;
+    /** Synchronous current-page container query. */
+    pageMode?(): import('./page-mode').PageMode;
+    /** Temporarily tint the active plugin's host shell; optional background recolors the TABS bar / Panel header; null restores the user theme. */
+    setTempHostTheme?: import('./host-theme').SetTempHostTheme;
+    shortcuts?: {
+        register(shortcut: string, handler: () => void): Promise<() => Promise<void>>;
+    };
     capture?: import('./capture-factory').CaptureApi;
+    ai?: import('./ai-types').AiApi;
+    agent?: import('./agent-types').AgentApi;
+    data?: ReturnType<typeof import('./plugin-data-factory').createPluginDataApi>;
+    observation?: import('./observation-factory').ObservationApi;
+    reminders?: ReturnType<typeof import('./reminder-factory').createReminderApi>;
     isDev(): boolean;
     isMacOS(): boolean;
     isWindows(): boolean;
@@ -101,6 +148,24 @@ export interface OToolsAPI {
     readHostFile?(path: string): Promise<OToolsHostReadFilePayload>;
     browseHostDir?(path: string): Promise<OToolsHostBrowsePayload>;
     writeHostFile?(request: OToolsHostWriteFileRequest): Promise<void>;
+    getHostEventStatus?(): Promise<{
+        schemaVersion: number;
+        clipboard: {
+            state: string;
+            code: string | null;
+            skippedItems: number;
+        };
+        subscriptions: {
+            pluginId: string;
+            topics: string[];
+            state: string;
+            deliveredEvents: number;
+            droppedEvents: number;
+            queuedEvents: number;
+            queuedBytes: number;
+            lastError: string | null;
+        }[];
+    }>;
     invokeNative<T = unknown>(method: string, payload?: unknown): Promise<T>;
     invokeNativePlugin?<T = unknown>(uuid: string, method: string, payload?: unknown): Promise<T>;
     invokeNativeRaw<T = unknown>(method: string, payload?: unknown): Promise<T>;

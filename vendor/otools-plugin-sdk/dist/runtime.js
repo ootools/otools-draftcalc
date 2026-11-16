@@ -1,6 +1,6 @@
-import { attachTransformListener as G, detachTransformListener as V, listenNativeTopic as z } from "./native-event-bridge.js";
-import { ensurePopupManager as X } from "./popup-manager.js";
-const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ */ new Set(["crop-images-updated", "otools:custom-open"]), K = /* @__PURE__ */ new Set([
+import { attachTransformListener as G, detachTransformListener as V, listenNativeTopic as q } from "./native-event-bridge.js";
+import { ensurePopupManager as z } from "./popup-manager.js";
+const X = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, O = /* @__PURE__ */ new Set(["crop-images-updated", "otools:custom-open", "otools:deep-link-ready"]), K = /* @__PURE__ */ new Set([
   "set_window_theme",
   "update_tray_menu"
 ]), Y = /* @__PURE__ */ new Set([
@@ -12,48 +12,63 @@ const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ 
   "open_project_boot_window"
 ]), N = /* @__PURE__ */ Symbol(
   "shared-host-command-not-handled"
-), x = /^(get|save|patch)_otools_plugin_(localstate|syncstate)(_value)?(_with_scheme)?$/, d = () => typeof window < "u", L = () => {
+), F = /^(get|save|patch)_otools_plugin_(localstate|syncstate)(_value)?(_with_scheme)?$/, w = () => typeof window < "u", L = () => {
   try {
-    return typeof __OTOOLS_PLUGIN_UUID__ == "string" ? P(__OTOOLS_PLUGIN_UUID__) : "";
+    return typeof __OTOOLS_PLUGIN_UUID__ == "string" ? k(__OTOOLS_PLUGIN_UUID__) : "";
   } catch {
     return "";
   }
-}, E = (t) => t.startsWith("plugin:"), C = (t) => x.test(t), Z = "otools_host_", tt = /* @__PURE__ */ new Set([
+}, P = (t) => t.startsWith("plugin:"), C = (t) => F.test(t), Z = "otools_host_", tt = /* @__PURE__ */ new Set([
   "otools_copy_text",
+  "otools_ai_switch_status",
+  "otools_ai_switch_models",
+  "otools_ai_embeddings",
+  "otools_ai_speech",
+  "otools_ai_transcribe",
+  "otools_ai_images",
+  "otools_ai_video_submit",
+  "otools_ai_video_status",
+  "otools_ai_video_content",
+  "otools_ai_generate_text",
+  "otools_ai_load_chat_history",
+  "otools_ai_save_chat_history",
   "hide_panel_window",
   "detach_tools_tab_to_window",
   "open_custom_plugin_window",
   "list_custom_plugin_windows",
   "close_custom_plugin_windows",
-  "custom_plugin_window_ready"
-]), T = (t) => t.startsWith(Z) || tt.has(t), P = (t) => {
+  "custom_plugin_window_ready",
+  "tools_webview_browse_dialog",
+  "tools_webview_list_dir",
+  "tools_webview_read_file"
+]), E = (t) => t.startsWith(Z) || tt.has(t), k = (t) => {
   const e = String(t ?? "").trim();
   if (!e)
     return "";
   const n = e.lastIndexOf(":");
   if (n <= 0 || n >= e.length - 1)
     return e;
-  const i = e.slice(0, n).trim().toLowerCase(), o = e.slice(n + 1).trim();
-  return o && (i === "builtin" || i === "market" || i === "dev-debug" || i === "dev-workspace") ? o : e;
+  const i = e.slice(0, n).trim().toLowerCase(), r = e.slice(n + 1).trim();
+  return r && (i === "builtin" || i === "market" || i === "dev-debug" || i === "dev-workspace") ? r : e;
 }, et = (t) => {
   const e = [], n = String(t ?? "");
   if (n && e.push(n), t && typeof t == "object") {
-    const i = t, o = String(i.message ?? ""), u = String(i.code ?? ""), r = String(i.detail ?? "");
-    o && e.push(o), u && e.push(u), r && e.push(r);
+    const i = t, r = String(i.message ?? ""), u = String(i.code ?? ""), o = String(i.detail ?? "");
+    r && e.push(r), u && e.push(u), o && e.push(o);
   }
   return e.join(" | ");
 }, U = (t) => {
   const e = et(t).toLowerCase();
   return e ? e.includes("not allowed") || e.includes("command not found") || e.includes("unknown method") || e.includes("unknown command") : !1;
-}, nt = (t) => U(t), v = () => {
-  if (d())
-    for (const t of F()) {
+}, nt = (t) => U(t), p = () => {
+  if (w())
+    for (const t of m()) {
       const e = t.otools ?? t.utools;
       if (e)
         return e;
     }
-}, M = () => typeof v()?.invokeNative == "function", F = () => {
-  if (!d())
+}, M = () => typeof p()?.invokeNative == "function", m = () => {
+  if (!w())
     return [];
   const t = [
     window
@@ -68,7 +83,7 @@ const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ 
     }
   return t;
 }, W = () => {
-  if (!d())
+  if (!w())
     return !1;
   try {
     const t = window.__OToolsEnv;
@@ -80,11 +95,11 @@ const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ 
     return !1;
   }
 }, I = async (t = 1200) => {
-  if (!d())
+  if (!w())
     return;
   const e = Date.now() + t;
   for (; Date.now() <= e; ) {
-    for (const n of F()) {
+    for (const n of m()) {
       const i = n.otools ?? n.utools;
       if (typeof i?.invokeNative == "function" || typeof i?.invokeNativePlugin == "function")
         return i;
@@ -93,80 +108,88 @@ const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ 
       window.setTimeout(n, 20);
     });
   }
-  return v();
-}, b = (t) => {
-  const e = P(t?.getPluginUuid?.());
+  return p();
+}, T = (t) => {
+  const e = k(t?.getPluginUuid?.());
   if (e)
     return e;
-  if (!d())
+  if (!w())
     return L();
   try {
-    const n = window.__OToolsEnv, i = P(n?.pluginUuid);
+    const n = window.__OToolsEnv, i = k(n?.pluginUuid);
     if (i)
       return i;
-    const o = new URLSearchParams(window.location.search || ""), u = P(
-      o.get("plugin") || o.get("pluginUuid") || o.get("plugin_uuid") || ""
+    const r = new URLSearchParams(window.location.search || ""), u = k(
+      r.get("plugin") || r.get("pluginUuid") || r.get("plugin_uuid") || ""
     );
     if (u)
       return u;
   } catch {
   }
   return L();
-}, w = () => {
-  if (d())
+}, c = () => {
+  if (w())
     return window.__TAURI_INTERNALS__;
-}, it = (t) => `${q}${t}`, g = (t) => `${Q}${t}`, R = (t, e) => {
-  d() && window.dispatchEvent(
+}, it = (t) => `${X}${t}`, b = (t) => `${Q}${t}`, H = (t, e) => {
+  w() && window.dispatchEvent(
     new CustomEvent(it(t), {
       detail: { payload: e }
     })
   );
-}, rt = (t, e) => {
-  d() && window.dispatchEvent(
-    new CustomEvent(g(t), {
+}, ot = (t, e) => {
+  w() && window.dispatchEvent(
+    new CustomEvent(b(t), {
       detail: { payload: e }
     })
   );
-}, y = (t) => !t || typeof t != "object" || Array.isArray(t) ? null : t, k = (t, e, n, i = !1) => {
-  const o = y(e)?.[n];
-  if (typeof o != "string" || !i && !o.trim())
+}, d = (t) => !t || typeof t != "object" || Array.isArray(t) ? null : t, h = (t, e, n, i = !1) => {
+  const r = d(e)?.[n];
+  if (typeof r != "string" || !i && !r.trim())
     throw new Error(`${t} requires ${n}`);
-  return o;
-}, ot = (t) => {
+  return r;
+}, rt = (t) => {
   const e = atob(t), n = new Uint8Array(e.length);
   for (let i = 0; i < e.length; i += 1)
     n[i] = e.charCodeAt(i);
   return new TextDecoder().decode(n);
 }, st = (t) => {
   const e = new TextEncoder().encode(t), n = [], i = 32768;
-  for (let o = 0; o < e.length; o += i)
+  for (let r = 0; r < e.length; r += i)
     n.push(
-      String.fromCharCode(...e.subarray(o, o + i))
+      String.fromCharCode(...e.subarray(r, r + i))
     );
   return btoa(n.join(""));
 }, ut = async (t, e, n) => {
+  if (e === "tools_webview_list_dir" && typeof t.listHostDir == "function")
+    return t.listHostDir(h(e, n, "path"));
+  if (e === "tools_webview_read_file" && typeof t.readHostFile == "function")
+    return t.readHostFile(h(e, n, "path"));
+  if (e === "tools_webview_browse_dialog" && typeof t.browseHostDir == "function" && !c()?.invoke) {
+    const i = d(d(n)?.request);
+    return t.browseHostDir(String(i?.path ?? "").trim());
+  }
   if (e === "read_directory_recursive" && typeof t.listHostDir == "function") {
-    const i = k(e, n, "path");
+    const i = h(e, n, "path");
     return (await t.listHostDir(i)).filter((u) => !u.name.startsWith(".")).map((u) => {
-      const r = u.kind === "directory";
+      const o = u.kind === "directory";
       return {
         id: u.path,
         label: u.name,
         path: u.path,
-        is_directory: r,
-        isLeaf: !r
+        is_directory: o,
+        isLeaf: !o
       };
     });
   }
   if (e === "read_file_content" && typeof t.readHostFile == "function") {
-    const i = k(e, n, "filePath"), o = await t.readHostFile(i);
-    return ot(o.dataBase64);
+    const i = h(e, n, "filePath"), r = await t.readHostFile(i);
+    return rt(r.dataBase64);
   }
   if (e === "write_file_content" && typeof t.writeHostFile == "function") {
-    const i = k(e, n, "filePath"), o = k(e, n, "content", !0);
+    const i = h(e, n, "filePath"), r = h(e, n, "content", !0);
     return t.writeHostFile({
       path: i,
-      dataBase64: st(o)
+      dataBase64: st(r)
     });
   }
   if (e === "browse_dialog" && typeof t.browseHostDir == "function") {
@@ -177,60 +200,60 @@ const q = "otools:", Q = "otools-tauri:", J = { kind: "Any" }, S = /* @__PURE__ 
   }
   return N;
 }, at = async (t, e, n) => {
-  const i = x.exec(e);
+  const i = F.exec(e);
   if (!i)
     return N;
-  const [, o, u, r, s] = i, a = `${o}Plugin${u === "localstate" ? "Local" : "Sync"}State${r ? "Value" : ""}`, c = t[a];
-  if (typeof c != "function")
+  const [, r, u, o, s] = i, a = `${r}Plugin${u === "localstate" ? "Local" : "Sync"}State${o ? "Value" : ""}`, f = t[a];
+  if (typeof f != "function")
     return N;
-  const l = y(n), j = typeof l?.plugin == "string" ? l.plugin : void 0, B = s && typeof l?.scheme == "string" ? l.scheme : null, _ = [j];
-  return o === "get" ? r && _.push(l?.key) : o === "patch" ? _.push(l?.patch ?? {}) : r ? _.push(l?.key, l?.value ?? null) : _.push(l?.state ?? null), _.push(B), c.apply(
+  const l = d(n), j = typeof l?.plugin == "string" ? l.plugin : void 0, B = s && typeof l?.scheme == "string" ? l.scheme : null, v = [j];
+  return r === "get" ? o && v.push(l?.key) : r === "patch" ? v.push(l?.patch ?? {}) : o ? v.push(l?.key, l?.value ?? null) : v.push(l?.state ?? null), v.push(B), f.apply(
     t,
-    _
+    v
   );
-}, O = (t, e, n) => {
-  const i = y(e);
-  t === "switch_provider" && i?.app && i?.id && R("provider-switched", {
+}, S = (t, e, n) => {
+  const i = d(e);
+  t === "switch_provider" && i?.app && i?.id && H("provider-switched", {
     appType: i.app,
     providerId: i.id,
     source: "native-plugin",
     result: n
-  }), t === "sync_universal_provider" && i?.id && R("universal-provider-synced", {
+  }), t === "sync_universal_provider" && i?.id && H("universal-provider-synced", {
     id: i.id,
     result: n
   });
-}, f = async (t, e) => {
-  const n = w();
+}, _ = async (t, e) => {
+  const n = c();
   if (!n?.invoke)
     throw new Error("Tauri runtime is unavailable");
   return n.invoke(
     t,
     e
   );
-}, h = async (t, e, n) => {
+}, g = async (t, e, n) => {
   try {
     return await t();
   } catch (i) {
-    if (!nt(i) || !w()?.invoke)
+    if (!nt(i) || !c()?.invoke)
       throw i;
-    return f(e, n);
+    return _(e, n);
   }
 }, lt = (t) => t && typeof t == "object" && "payload" in t ? t.payload ?? null : t;
 async function A(t, e, n = {}) {
-  const i = w();
+  const i = c();
   if (!i?.invoke || !i.transformCallback)
     throw new Error("Tauri event runtime is unavailable");
-  let o = !0;
+  let r = !0;
   const u = i.transformCallback((a) => {
-    o && e({
+    r && e({
       event: t,
       id: a && typeof a == "object" && "id" in a ? Number(a.id) : -1,
       payload: lt(a)
     });
   }, !1);
-  let r;
+  let o;
   try {
-    r = await i.invoke("plugin:event|listen", {
+    o = await i.invoke("plugin:event|listen", {
       event: t,
       target: typeof n.target == "string" ? { kind: "AnyLabel", label: n.target } : n.target ?? J,
       handler: u
@@ -239,61 +262,61 @@ async function A(t, e, n = {}) {
     throw i.unregisterCallback?.(u), a;
   }
   return async () => {
-    if (o) {
-      o = !1;
+    if (r) {
+      r = !1;
       try {
         await window.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener?.(
           t,
-          r
+          o
         );
       } catch {
       }
       i.unregisterCallback?.(u), await i.invoke("plugin:event|unlisten", {
         event: t,
-        eventId: r
+        eventId: o
       });
     }
   };
 }
-let p = 0, H = Promise.resolve(), D = Promise.resolve();
-const m = (t) => {
-  const e = H.then(() => f("custom_plugin_window_ready", { ready: t }));
-  return H = e.catch(() => {
+let y = 0, D = Promise.resolve(), R = Promise.resolve();
+const x = (t) => {
+  const e = D.then(() => _("custom_plugin_window_ready", { ready: t }));
+  return D = e.catch(() => {
   }), e;
 };
 async function ct(t) {
   const e = await A("otools:custom-open", t, {
-    target: { kind: "Webview", label: w()?.metadata?.currentWebview?.label ?? w()?.metadata?.currentWindow?.label ?? "" }
+    target: { kind: "Webview", label: c()?.metadata?.currentWebview?.label ?? c()?.metadata?.currentWindow?.label ?? "" }
   });
-  p += 1;
+  y += 1;
   try {
-    p === 1 && (D = m(!0)), await D;
+    y === 1 && (R = x(!0)), await R;
   } catch (i) {
-    throw p -= 1, await e(), i;
+    throw y -= 1, await e(), i;
   }
   let n = !0;
   return async () => {
     if (n) {
-      n = !1, p -= 1;
+      n = !1, y -= 1;
       try {
-        p === 0 && await m(!1);
+        y === 0 && await x(!1);
       } finally {
         await e();
       }
     }
   };
 }
-async function dt(t, e) {
-  let n = v();
+async function wt(t, e) {
+  let n = p();
   const i = W();
   if (!M() && i && (n = await I()), n) {
-    const r = await ut(
+    const o = await ut(
       n,
       t,
       e
     );
-    if (r !== N)
-      return r;
+    if (o !== N)
+      return o;
     const s = await at(
       n,
       t,
@@ -303,22 +326,22 @@ async function dt(t, e) {
       return s;
   }
   if (typeof n?.invokeNative != "function") {
-    if (E(t))
-      return f(t, e);
-    const r = b(n);
-    if (r && !C(t) && !T(t) && typeof n?.invokeNativePlugin == "function")
-      return n.invokeNativePlugin(r, t, e ?? null);
+    if (P(t))
+      return _(t, e);
+    const o = T(n);
+    if (o && !C(t) && !E(t) && typeof n?.invokeNativePlugin == "function")
+      return n.invokeNativePlugin(o, t, e ?? null);
     try {
-      return await f(t, e);
+      return await _(t, e);
     } catch (s) {
-      if (E(t) || T(t) || !U(s))
+      if (P(t) || E(t) || !U(s))
         throw s;
-      const a = i || L() ? 1200 : 200, c = await I(a), l = b(c);
-      if (l && typeof c?.invokeNativePlugin == "function")
-        return c.invokeNativePlugin(l, t, e ?? null);
-      if (typeof c?.invokeNative != "function")
+      const a = i || L() ? 1200 : 200, f = await I(a), l = T(f);
+      if (l && typeof f?.invokeNativePlugin == "function")
+        return f.invokeNativePlugin(l, t, e ?? null);
+      if (typeof f?.invokeNative != "function")
         throw s;
-      return c.invokeNative(t, e ?? null);
+      return f.invokeNative(t, e ?? null);
     }
   }
   if (t === "get_init_error")
@@ -326,75 +349,75 @@ async function dt(t, e) {
   if (K.has(t))
     return !0;
   if (t === "plugin:event|listen") {
-    const r = y(e), s = typeof r?.event == "string" ? r.event : "", a = typeof r?.handler == "number" ? r.handler : NaN;
+    const o = d(e), s = typeof o?.event == "string" ? o.event : "", a = typeof o?.handler == "number" ? o.handler : NaN;
     if (!s || Number.isNaN(a))
       throw new Error("plugin:event|listen requires event and handler");
     return await G(s, a);
   }
   if (t === "plugin:event|unlisten") {
-    const r = y(e), s = typeof r?.eventId == "number" ? r.eventId : NaN;
+    const o = d(e), s = typeof o?.eventId == "number" ? o.eventId : NaN;
     Number.isNaN(s) || await V(s);
     return;
   }
-  if (E(t) || C(t) || T(t))
-    return f(t, e);
-  const o = b(n), u = o && typeof n.invokeNativePlugin == "function" ? n.invokeNativePlugin.bind(n) : null;
+  if (P(t) || C(t) || E(t))
+    return _(t, e);
+  const r = T(n), u = r && typeof n.invokeNativePlugin == "function" ? n.invokeNativePlugin.bind(n) : null;
   if (Y.has(t)) {
-    const r = u ? await h(
-      () => u(o, t, e ?? null),
+    const o = u ? await g(
+      () => u(r, t, e ?? null),
       t,
       e
-    ) : await h(
+    ) : await g(
       () => n.invokeNative(t, e ?? null),
       t,
       e
-    ), s = typeof r?.path == "string" ? r.path : null;
+    ), s = typeof o?.path == "string" ? o.path : null;
     if (s) {
-      X().open(s, t, e);
+      z().open(s, t, e);
       return;
     }
-    return r;
+    return o;
   }
   if (u) {
-    const r = await h(
-      () => u(o, t, e ?? null),
+    const o = await g(
+      () => u(r, t, e ?? null),
       t,
       e
     );
-    return O(t, e, r), r;
+    return S(t, e, o), o;
   }
   try {
-    const r = await h(
+    const o = await g(
       () => n.invokeNative(t, e ?? null),
       t,
       e
     );
-    return O(t, e, r), r;
-  } catch (r) {
-    if (!o || typeof n.invokeNativePlugin != "function" || !U(r))
-      throw r;
-    const s = n.invokeNativePlugin.bind(n), a = await h(
-      () => s(o, t, e ?? null),
+    return S(t, e, o), o;
+  } catch (o) {
+    if (!r || typeof n.invokeNativePlugin != "function" || !U(o))
+      throw o;
+    const s = n.invokeNativePlugin.bind(n), a = await g(
+      () => s(r, t, e ?? null),
       t,
       e
     );
-    return O(t, e, a), a;
+    return S(t, e, a), a;
   }
 }
-async function _t(t, e, n = {}) {
-  if (t === "otools:custom-open" && w()?.invoke && window.__OTOOLS_CUSTOM_WINDOW__)
+async function dt(t, e, n = {}) {
+  if (t === "otools:custom-open" && c()?.invoke && window.__OTOOLS_CUSTOM_WINDOW__)
     return ct(e);
-  if (w()?.invoke && (S.has(t) || n.target))
+  if (c()?.invoke && (O.has(t) || n.target))
     return A(t, e, n);
-  if (!w()?.invoke && S.has(t)) {
+  if (!c()?.invoke && O.has(t)) {
     const s = (a) => {
       e({ event: t, id: -1, payload: a.detail?.payload });
     };
-    return window.addEventListener(g(t), s), () => window.removeEventListener(g(t), s);
+    return window.addEventListener(b(t), s), () => window.removeEventListener(b(t), s);
   }
-  let i = v();
-  const o = W();
-  if (!M() && o && (i = await I()), typeof i?.invokeNative != "function")
+  let i = p();
+  const r = W();
+  if (!M() && r && (i = await I()), typeof i?.invokeNative != "function")
     return A(t, e);
   const u = (s) => {
     const a = s.detail;
@@ -404,8 +427,8 @@ async function _t(t, e, n = {}) {
       payload: a?.payload ?? null
     });
   };
-  window.addEventListener(g(t), u);
-  const r = await z(t, async (s) => {
+  window.addEventListener(b(t), u);
+  const o = await q(t, async (s) => {
     await e({
       event: t,
       id: -1,
@@ -413,31 +436,31 @@ async function _t(t, e, n = {}) {
     });
   });
   return async () => {
-    await r(), window.removeEventListener(
-      g(t),
+    await o(), window.removeEventListener(
+      b(t),
       u
     );
   };
 }
 async function vt(t, e) {
-  if (S.has(t)) {
-    await f("plugin:event|emit", { event: t, payload: e ?? null });
+  if (O.has(t)) {
+    await _("plugin:event|emit", { event: t, payload: e ?? null });
     return;
   }
-  rt(t, e ?? null);
+  ot(t, e ?? null);
 }
 function $(t) {
   return t.shell ?? t.runtime?.shell ?? void 0;
 }
 function ht(t) {
-  const e = v();
+  const e = p();
   if (!e)
     return !1;
   const n = $(e);
   return typeof n?.openExternal == "function" ? (n.openExternal(t), !0) : (e.shellOpenExternal(t), !0);
 }
 function pt(t) {
-  const e = v();
+  const e = p();
   if (!e)
     return !1;
   const n = $(e);
@@ -445,11 +468,11 @@ function pt(t) {
 }
 export {
   vt as emit,
-  v as getOtoolsApi,
-  dt as invoke,
-  f as invokeTauri,
+  p as getOtoolsApi,
+  wt as invoke,
+  _ as invokeTauri,
   M as isOtoolsPluginRuntime,
-  _t as listen,
+  dt as listen,
   A as listenTauri,
   ht as openExternal,
   pt as openPath

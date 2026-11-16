@@ -1,6 +1,6 @@
 {
   "name": "otools-plugin-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OTools compatibility SDK for migrating Tauri apps into OTools plugins",
   "keywords": [
     "otools",
@@ -9,14 +9,13 @@
     "plugin",
     "sdk"
   ],
-  "homepage": "https://github.com/farion1231/cc-switch/tree/main/otools-plugin-sdk",
+  "homepage": "https://github.com/ootools/otools-plugin-sdk#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/farion1231/cc-switch.git",
-    "directory": "otools-plugin-sdk"
+    "url": "https://github.com/ootools/otools-plugin-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/farion1231/cc-switch/issues"
+    "url": "https://github.com/ootools/otools-plugin-sdk/issues"
   },
   "type": "module",
   "sideEffects": false,
@@ -33,6 +32,26 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./agent-factory": {
+      "types": "./dist/agent-factory.d.ts",
+      "import": "./dist/agent-factory.js"
+    },
+    "./ai-factory": {
+      "types": "./dist/ai-factory.d.ts",
+      "import": "./dist/ai-factory.js"
+    },
+    "./plugin-data-factory": {
+      "types": "./dist/plugin-data-factory.d.ts",
+      "import": "./dist/plugin-data-factory.js"
+    },
+    "./reminder-factory": {
+      "types": "./dist/reminder-factory.d.ts",
+      "import": "./dist/reminder-factory.js"
+    },
+    "./observation-factory": {
+      "types": "./dist/observation-factory.d.ts",
+      "import": "./dist/observation-factory.js"
     },
     "./capture": {
       "types": "./dist/capture.d.ts",
@@ -63,6 +82,21 @@
       "types": "./dist/popup-manager.d.ts",
       "import": "./dist/popup-manager.js",
       "default": "./dist/popup-manager.js"
+    },
+    "./host-tree-factory": {
+      "types": "./dist/host-tree-factory.d.ts",
+      "import": "./dist/host-tree-factory.js",
+      "default": "./dist/host-tree-factory.js"
+    },
+    "./keyword-factory": {
+      "types": "./dist/keyword-factory.d.ts",
+      "import": "./dist/keyword-factory.js",
+      "default": "./dist/keyword-factory.js"
+    },
+    "./file-open-factory": {
+      "types": "./dist/file-open-factory.d.ts",
+      "import": "./dist/file-open-factory.js",
+      "default": "./dist/file-open-factory.js"
     },
     "./native-event-bridge": {
       "types": "./dist/native-event-bridge.d.ts",
@@ -124,7 +158,12 @@
       "import": "./dist/tauri-plugin-updater-shim.js",
       "default": "./dist/tauri-plugin-updater-shim.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./deep-links": {
+      "types": "./dist/deep-links.d.ts",
+      "import": "./dist/deep-links.js",
+      "default": "./dist/deep-links.js"
+    }
   },
   "engines": {
     "node": ">=18"
@@ -141,6 +180,8 @@
   "scripts": {
     "build": "vite build",
     "sync:capture-injection": "node scripts/sync-capture-injection.mjs",
+    "sync:service-injection": "node scripts/sync-service-injection.mjs",
+    "check:service-injection": "node scripts/sync-service-injection.mjs --check",
     "check:capture-injection": "node scripts/sync-capture-injection.mjs --check",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
